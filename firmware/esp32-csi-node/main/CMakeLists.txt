@@ -17,6 +17,8 @@ set(SRCS
     "c6_sync_espnow.c"
     # ADR-110 B1/B2 unblock — soft-AP HE/TWT (C6-only when enabled)
     "c6_softap_he.c"
+    # AGC/FFT gain lock — amplitude-drift experiment (CONFIG_CSI_GAIN_LOCK)
+    "gain_lock.c"
 )
 
 # ESP-IDF v6+: headers must resolve via explicit REQUIRES (no implicit deps).

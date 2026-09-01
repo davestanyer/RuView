@@ -1,0 +1,303 @@
+{
+  "kind": "ruview_desk_discriminator_logreg_v1",
+  "created_by": "scripts/train-desk-discriminator.py",
+  "feature_names": [
+    "mean",
+    "std",
+    "median",
+    "p25",
+    "p75",
+    "max",
+    "zero_ratio",
+    "frame_mean_mean",
+    "frame_mean_std",
+    "frame_mean_min",
+    "frame_mean_max",
+    "subcarrier_mean_std",
+    "subcarrier_mean_p10",
+    "subcarrier_mean_p90",
+    "diff_abs_mean",
+    "diff_std",
+    "diff_abs_p90",
+    "band0_mean",
+    "band1_mean",
+    "band2_mean",
+    "band3_mean",
+    "band0_std",
+    "band1_std",
+    "band2_std",
+    "band3_std"
+  ],
+  "classes": [
+    "away",
+    "seated",
+    "standing_near"
+  ],
+  "standardization": {
+    "mean": [
+      16.846445680130635,
+      14.111035880863527,
+      14.598244648412209,
+      4.881985364620158,
+      26.84624656575839,
+      58.00712151486395,
+      0.21471573774154132,
+      16.846445716667027,
+      5.3390163920464415,
+      6.89934112542863,
+      24.710050421827376,
+      9.62385484368844,
+      0.0,
+      26.00839062646742,
+      11.794998942174606,
+      16.710827826707973,
+      28.650538976160785,
+      20.846010527264056,
+      21.259921155188398,
+      3.7684120020892493,
+      21.511439139252065,
+      14.173212409299085,
+      14.983439168862946,
+      7.547598616978076,
+      8.703215192685937
+    ],
+    "scale": [
+      0.9846054346115464,
+      0.9043432473939302,
+      1.3094158718060722,
+      0.9439248461781586,
+      1.7863445836719265,
+      7.3584832528316495,
+      0.0008985348826757374,
+      0.9846054638484314,
+      0.7666726291007515,
+      1.181647056116575,
+      3.1888860797972844,
+      0.6770507041299849,
+      1.0,
+      1.9626263455039241,
+      0.9363013003659288,
+      1.327544963215587,
+      2.329894469131492,
+      1.8810519188123977,
+      2.0771267593148632,
+      0.3743707713286675,
+      1.894359765625554,
+      1.0504858142544964,
+      1.5148186177142653,
+      1.0468565502570806,
+      1.0912367137551247
+    ]
+  },
+  "model": {
+    "type": "multinomial_logistic_regression",
+    "coef": [
+      [
+        0.15179622445058866,
+        -0.11940613622624185,
+        0.041276207010840144,
+        -0.016600761399597513,
+        0.5606932142583915,
+        -0.19341865050520746,
+        -0.0015197729435878875,
+        0.1517960031089641,
+        0.22645262932717306,
+        -0.7792140390274604,
+        -0.39606482022601813,
+        0.4974847120638762,
+        0.0,
+        0.4296231155539512,
+        -0.41165394958244594,
+        -0.4235174644223448,
+        -0.18915079690529318,
+        -1.2827099252754377,
+        0.7316275267553944,
+        0.025924114001452895,
+        0.7819489924604556,
+        0.8591548259175092,
+        -0.575832017453665,
+        -1.0580955756030008,
+        0.020514808678462868
+      ],
+      [
+        -0.21873297449519122,
+        -0.2873417973802719,
+        -0.5231859471106899,
+        0.5519996596669031,
+        0.6837748828049998,
+        -0.3110730093109922,
+        -0.016367110599558015,
+        -0.2187324797759888,
+        0.7847163702223541,
+        -0.5286278976686887,
+        -0.1119887488097128,
+        -0.7218616864261361,
+        0.0,
+        0.005301298309871713,
+        0.25525511000489937,
+        0.3376144606792109,
+        -0.223101423503605,
+        1.1782087647488046,
+        -2.0064182573791793,
+        0.8740060146599433,
+        0.4025902174192598,
+        -0.48748318934862733,
+        0.46692484238947474,
+        -0.32191916118899,
+        -0.6442006214419845
+      ],
+      [
+        0.0669367500446036,
+        0.406747933606517,
+        0.48190974009984855,
+        -0.5353988982673069,
+        -1.244468097063389,
+        0.5044916598162037,
+        0.017886883543146853,
+        0.06693647666702604,
+        -1.0111689995495254,
+        1.3078419366961522,
+        0.5080535690357326,
+        0.2243769743622611,
+        0.0,
+        -0.434924413863819,
+        0.15639883957754974,
+        0.0859030037431378,
+        0.4122522204089003,
+        0.10450116052663579,
+        1.27479073062379,
+        -0.8999301286613985,
+        -1.184539209879717,
+        -0.3716716365688809,
+        0.1089071750641919,
+        1.380014736791992,
+        0.6236858127635228
+      ]
+    ],
+    "intercept": [
+      1.5030942453975051,
+      -0.04273020163465155,
+      -1.4603640437628622
+    ],
+    "decision": "softmax(argmax(coef * ((x - mean) / scale) + intercept))"
+  },
+  "dataset": {
+    "seated": {
+      "paths": [
+        "data/paired-ser8-active-tx-calibration/seated-active-tx-camera-20260709_170256.paired.jsonl"
+      ],
+      "rows": 413,
+      "confidence_mean": 0.6639830508474577,
+      "confidence_min": 0.608,
+      "confidence_max": 0.711
+    },
+    "standing_near": {
+      "paths": [
+        "data/paired-ser8-active-tx-calibration/standing-near-active-tx-camera-20260709_183025.paired.jsonl"
+      ],
+      "rows": 236,
+      "confidence_mean": 0.767093220338983,
+      "confidence_min": 0.584,
+      "confidence_max": 0.862
+    },
+    "away": {
+      "paths": [
+        "data/paired-ser8-active-tx-calibration/away-active-tx-camera-20260709_183435.paired.jsonl"
+      ],
+      "rows": 630,
+      "confidence_mean": 0.8678047619047621,
+      "confidence_min": 0.806,
+      "confidence_max": 0.942
+    }
+  },
+  "metrics": {
+    "cv_f1_macro_scores": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      0.9944462382951244
+    ],
+    "cv_f1_macro_mean": 0.9988892476590248,
+    "holdout_accuracy": 1.0,
+    "holdout_f1_macro": 1.0,
+    "labels": [
+      "seated",
+      "away",
+      "standing_near"
+    ],
+    "holdout_confusion_matrix": [
+      [
+        103,
+        0,
+        0
+      ],
+      [
+        0,
+        158,
+        0
+      ],
+      [
+        0,
+        0,
+        59
+      ]
+    ],
+    "classification_report": {
+      "away": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 158.0
+      },
+      "seated": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 103.0
+      },
+      "standing_near": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 59.0
+      },
+      "accuracy": 1.0,
+      "macro avg": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 320.0
+      },
+      "weighted avg": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 320.0
+      }
+    }
+  },
+  "notes": [
+    "Training camera is a temporary calibration oracle, not a product dependency.",
+    "This artifact is for desk occupancy discrimination: seated vs away vs standing_near.",
+    "Validate on live rolling windows before product-clamping any user-facing state.",
+    "Active-TX geometry model: node 6 ESP32-S3 station-mode null-data/probe injection at 200 ms cadence.",
+    "Trained on SER8 webcam camera-supervised captures from 2026-07-09 under active transmitter geometry.",
+    "Standing-near class has fewer paired windows and weaker camera coverage than seated/away; recapture if live standing/seated separation is unstable."
+  ],
+  "active_tx_context": {
+    "node6_mode": "ESP32-S3 active transmitter / illuminator, station mode, 200 ms cadence",
+    "paired_inputs": {
+      "seated": [
+        "data/paired-ser8-active-tx-calibration/seated-active-tx-camera-20260709_170256.paired.jsonl"
+      ],
+      "standing_near": [
+        "data/paired-ser8-active-tx-calibration/standing-near-active-tx-camera-20260709_183025.paired.jsonl"
+      ],
+      "away": [
+        "data/paired-ser8-active-tx-calibration/away-active-tx-camera-20260709_183435.paired.jsonl"
+      ]
+    },
+    "do_not_overwrite_live_without_approval": true
+  }
+}

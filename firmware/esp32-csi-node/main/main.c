@@ -49,6 +49,45 @@ static const char *TAG = "main";
 /* ADR-040: WASM timer handle (calls on_timer at configurable interval). */
 static esp_timer_handle_t s_wasm_timer;
 
+#ifdef CONFIG_RUVIEW_ACTIVE_TX_ENABLE
+static esp_timer_handle_t s_active_tx_timer;
+
+static void active_tx_timer_cb(void *arg)
+{
+    (void)arg;
+    static uint32_t s_err_count = 0;
+    esp_err_t err = csi_inject_ndp_frame();
+    if (err != ESP_OK && s_err_count < 5) {
+        s_err_count++;
+        ESP_LOGW(TAG, "active transmitter frame failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void active_tx_start(void)
+{
+    const esp_timer_create_args_t tx_args = {
+        .callback = &active_tx_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "active_tx",
+    };
+    esp_err_t err = esp_timer_create(&tx_args, &s_active_tx_timer);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "active transmitter timer create failed: %s", esp_err_to_name(err));
+        return;
+    }
+    err = esp_timer_start_periodic(
+        s_active_tx_timer,
+        (uint64_t)CONFIG_RUVIEW_ACTIVE_TX_INTERVAL_MS * 1000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "active transmitter timer start failed: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "RuView active transmitter enabled: null-data probe every %d ms",
+             CONFIG_RUVIEW_ACTIVE_TX_INTERVAL_MS);
+}
+#endif
+
 /* Runtime configuration (loaded from NVS or Kconfig defaults).
  * Global so other modules (wasm_upload.c) can access pubkey, etc. */
 nvs_config_t g_nvs_config;
@@ -500,6 +539,10 @@ void app_main(void)
     if (!has_display) {
         csi_collector_enable_data_capture();
     }
+
+#ifdef CONFIG_RUVIEW_ACTIVE_TX_ENABLE
+    active_tx_start();
+#endif
 
     ESP_LOGI(TAG, "CSI streaming active → %s:%d (edge_tier=%u, OTA=%s, WASM=%s, mmWave=%s, swarm=%s, adapt=%s)",
              g_nvs_config.target_ip, g_nvs_config.target_port,

@@ -11,3 +11,6 @@ dependencies:
 
   ## Onboard WS2812 LED Disabling
   espressif/led_strip: "^3.0.0"
+
+  ## AGC/FFT gain read + force for CSI amplitude stability (gain_lock.c)
+  espressif/esp_csi_gain_ctrl: ">=0.1.4"

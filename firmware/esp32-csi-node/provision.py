@@ -79,6 +79,7 @@ CONFIG_VALUE_CHECKS = [
     ("zone", lambda value: value is not None),
     ("swarm_hb", lambda value: value is not None),
     ("swarm_ingest", lambda value: value is not None),
+    ("ota_psk", lambda value: value is not None),
 ]
 
 
@@ -108,6 +109,7 @@ MERGEABLE_ATTRS = [
     "channel", "filter_mac",
     "hop_channels", "hop_dwell",
     "seed_url", "seed_token", "zone", "swarm_hb", "swarm_ingest",
+    "ota_psk",
 ]
 
 
@@ -234,6 +236,13 @@ def build_nvs_csv(args):
         writer.writerow(["swarm_hb", "data", "u16", str(args.swarm_hb)])
     if args.swarm_ingest is not None:
         writer.writerow(["swarm_ingest", "data", "u16", str(args.swarm_ingest)])
+    # OTA upload PSK — lives in the separate "security" namespace read by
+    # ota_update.c (RuView#596 fail-closed: without this, /ota rejects all
+    # uploads). Must be the LAST section: namespace rows switch context for
+    # every following key.
+    if getattr(args, "ota_psk", None) is not None:
+        writer.writerow(["security", "namespace", "", ""])
+        writer.writerow(["ota_psk", "data", "string", args.ota_psk])
     return buf.getvalue()
 
 
@@ -354,6 +363,9 @@ def main():
     parser.add_argument("--zone", type=str, help="Zone name for this node (e.g. lobby, hallway)")
     parser.add_argument("--swarm-hb", type=int, help="Swarm heartbeat interval in seconds (default 30)")
     parser.add_argument("--swarm-ingest", type=int, help="Swarm vector ingest interval in seconds (default 5)")
+    parser.add_argument("--ota-psk", type=str,
+                        help="OTA upload Bearer PSK (namespace 'security'; enables remote "
+                             "firmware upload on :8032/ota — fail-closed without it, RuView#596)")
     parser.add_argument("--dry-run", action="store_true", help="Generate NVS binary but don't flash")
     parser.add_argument("--force-partial", action="store_true",
                         help="[deprecated since #391/#574] Suppress the missing-WiFi-trio "

@@ -21,6 +21,7 @@ mod mediatek_csi;
 mod qualcomm_csi;
 mod realtek_radar;
 mod path_safety;
+mod presence_baseline;
 pub mod pose;
 pub mod pose_physics;
 mod rvf_container;
@@ -375,6 +376,171 @@ struct SensingUpdate {
     /// fresh node backs the room rather than a frozen online value.
     #[serde(skip_serializing_if = "Option::is_none")]
     room_inference: Option<RoomInference>,
+    /// Dave's office desk detector: derived from calibrated ESP32 node patterns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    desk_occupancy: Option<DeskOccupancyInfo>,
+    /// R3 camera-anchored empty-baseline presence gate (presence_baseline.rs).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    presence_gate: Option<presence_baseline::PresenceGateInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeskOccupancyInfo {
+    state: String,
+    seated: bool,
+    confidence: f64,
+    evidence_nodes: Vec<u8>,
+    note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stable_for_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    votes: Option<DeskOccupancyVotes>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeskOccupancyVotes {
+    presence: f64,
+    absent: f64,
+    desk_los: f64,
+    broad_uncertain: f64,
+    near_desk_not_seated: f64,
+    seated_candidate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_seated: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_away: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_standing_near: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct DeskModelPrediction {
+    label: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeskDiscriminatorArtifact {
+    classes: Vec<String>,
+    standardization: DeskDiscriminatorStandardization,
+    model: DeskDiscriminatorModel,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeskDiscriminatorStandardization {
+    mean: Vec<f64>,
+    scale: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeskDiscriminatorModel {
+    coef: Vec<Vec<f64>>,
+    intercept: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct DeskDiscriminator {
+    artifact: DeskDiscriminatorArtifact,
+}
+
+impl DeskDiscriminator {
+    fn load(data_dir: &std::path::Path) -> Option<Self> {
+        let path = std::env::var("RUVIEW_DESK_DISCRIMINATOR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| data_dir.join("calibration/desk_discriminator_logreg_20260702.json"));
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<DeskDiscriminatorArtifact>(&s).ok())
+        {
+            Some(artifact) => {
+                info!("Loaded desk discriminator from {}", path.display());
+                Some(Self { artifact })
+            }
+            None => {
+                warn!("No desk discriminator loaded from {}; using heuristic desk detector", path.display());
+                None
+            }
+        }
+    }
+
+    fn predict(&self, features: &[f64]) -> Option<DeskModelPrediction> {
+        let a = &self.artifact;
+        if features.len() != a.standardization.mean.len()
+            || features.len() != a.standardization.scale.len()
+            || a.classes.len() != a.model.coef.len()
+            || a.classes.len() != a.model.intercept.len()
+        {
+            return None;
+        }
+        let mut scores = Vec::with_capacity(a.classes.len());
+        for (class_idx, coef) in a.model.coef.iter().enumerate() {
+            if coef.len() != features.len() {
+                return None;
+            }
+            let mut score = a.model.intercept[class_idx];
+            for (i, value) in features.iter().enumerate() {
+                let scale = if a.standardization.scale[i].abs() < 1e-9 {
+                    1.0
+                } else {
+                    a.standardization.scale[i]
+                };
+                score += coef[i] * ((*value - a.standardization.mean[i]) / scale);
+            }
+            scores.push(score);
+        }
+        let max_score = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let exp_scores: Vec<f64> = scores.iter().map(|s| (*s - max_score).exp()).collect();
+        let denom: f64 = exp_scores.iter().sum();
+        let (idx, confidence) = exp_scores
+            .iter()
+            .enumerate()
+            .map(|(idx, score)| (idx, score / denom.max(1e-9)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+        Some(DeskModelPrediction {
+            label: a.classes[idx].clone(),
+            confidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeskFrameEvidence {
+    at: std::time::Instant,
+    presence: bool,
+    desk_los_present: usize,
+    near_desk_still: usize,
+    broad_global_motion: bool,
+    seated_candidate: bool,
+    /// True if ANY witness node reported moving or still this frame. This is
+    /// derived from the raw per-node motion labels, NOT from the (possibly
+    /// latched) top-level `presence` flag, so a sustained run of
+    /// `!any_node_present` frames lets the desk layer reach `absent` even when
+    /// the room guard is still holding `presence = true`.
+    any_node_present: bool,
+    evidence_nodes: Vec<u8>,
+    model_label: Option<String>,
+    model_confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct DeskOccupancyMemory {
+    frames: VecDeque<DeskFrameEvidence>,
+    csi_frames: VecDeque<Vec<f64>>,
+    stable_state: String,
+    stable_since: Option<std::time::Instant>,
+}
+
+impl DeskOccupancyMemory {
+    fn new() -> Self {
+        Self {
+            frames: VecDeque::with_capacity(512),
+            csi_frames: VecDeque::with_capacity(256),
+            stable_state: "unknown".to_string(),
+            stable_since: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1410,6 +1576,18 @@ struct AppStateInner {
     /// Per-node sensing state for multi-node deployments.
     /// Keyed by `node_id` from the ESP32 frame header.
     node_states: HashMap<u8, NodeState>,
+    /// Short-term rolling desk detector memory for Dave's office. The raw CSI
+    /// desk signature is ambiguous frame-by-frame, so product state is derived
+    /// from a bounded temporal vote window rather than one sample.
+    desk_occupancy_memory: DeskOccupancyMemory,
+    /// Camera-supervised desk posture discriminator loaded from data/calibration.
+    /// The camera is only a calibration oracle; runtime scoring is CSI-only.
+    desk_discriminator: Option<DeskDiscriminator>,
+    /// R3 camera-anchored empty-baseline presence gate (presence_baseline.rs).
+    /// Baseline captured via POST /api/v1/presence/baseline/capture when the
+    /// external oracle confirms the room empty; verdict clamps presence off on
+    /// sustained quorum-backed Empty; stale/missing baseline never asserts.
+    presence_gate: presence_baseline::PresenceGate,
     // ── Accuracy sprint: Kalman tracker, multistatic fusion, eigenvalue counting ──
     /// Global Kalman-based pose tracker for stable person IDs and smoothed keypoints.
     pose_tracker: PoseTracker,
@@ -1623,6 +1801,12 @@ impl AppStateInner {
     /// build the training router without the full server boot.
     pub(crate) fn minimal() -> Self {
         AppStateInner {
+            // Rebase 2026-09-01: desk-occupancy + R3 presence-gate state, kept
+            // trivial here. `desk_discriminator` stays `None` because tests have
+            // no data dir to load a trained model from.
+            desk_occupancy_memory: DeskOccupancyMemory::new(),
+            presence_gate: presence_baseline::PresenceGate::default(),
+            desk_discriminator: None,
             latest_update: None,
             rssi_history: VecDeque::new(),
             frame_history: VecDeque::new(),
@@ -2640,6 +2824,16 @@ fn raw_classify(score: f64) -> String {
 
 /// Debounce frames required before state transition (at ~10 FPS = ~0.4s).
 const DEBOUNCE_FRAMES: u32 = 4;
+/// Room-level adaptive/model outputs are noisier than the raw EMA path because
+/// they can jump between learned class centroids on a single frame. Require a
+/// little more evidence before switching between present states, and much more
+/// before declaring the room empty.
+const ROOM_PRESENT_DEBOUNCE_FRAMES: u32 = 6;
+/// Frames of sustained `absent` before the room flips empty (~0.8 s at 10 FPS).
+/// Kept above the present-debounce (still slightly asymmetric to resist single
+/// dropout frames) but lowered from 12 so a genuine departure clears in ~1 s
+/// rather than ~1.2 s. The desk-layer away/empty clamp is the faster path.
+const ROOM_ABSENT_DEBOUNCE_FRAMES: u32 = 8;
 /// EMA alpha for motion smoothing (~1s time constant at 10 FPS).
 const MOTION_EMA_ALPHA: f64 = 0.15;
 /// EMA alpha for slow-adapting baseline (~30s time constant at 10 FPS).
@@ -2738,7 +2932,7 @@ fn smooth_and_classify_node(ns: &mut NodeState, raw: &mut ClassificationInfo, ra
 /// If an adaptive model is loaded, override the classification with the
 /// model's prediction.  Uses the full 15-feature vector for higher accuracy.
 fn adaptive_override(
-    state: &AppStateInner,
+    state: &mut AppStateInner,
     features: &FeatureInfo,
     classification: &mut ClassificationInfo,
 ) {
@@ -2766,6 +2960,124 @@ fn adaptive_override(
         classification.presence = label != "absent";
         // Blend model confidence with existing smoothed confidence.
         classification.confidence = (conf * 0.7 + classification.confidence * 0.3).clamp(0.0, 1.0);
+    }
+    apply_room_level_guard(state, classification);
+}
+
+fn node_geometry_weight(node_id: u8) -> f64 {
+    match node_id {
+        // Dave's office calibration: nodes 2 and 3 sit on/near the desk LOS and
+        // should dominate presence evidence; node 5 is low/dead-angle context.
+        2 => 1.7,
+        3 => 1.5,
+        5 => 0.55,
+        _ => 1.0,
+    }
+}
+
+/// Geometry-weighted per-node motion evidence: returns
+/// `(present_w, moving_w, still_w, present_node_count)` where the last value is
+/// the number of DISTINCT fresh nodes reporting any presence (used to stop a
+/// single high-weight desk node from forcing the whole room present).
+fn weighted_node_motion_evidence(
+    node_states: &HashMap<u8, NodeState>,
+) -> (f64, f64, f64, usize) {
+    let now = std::time::Instant::now();
+    let mut present = 0.0;
+    let mut moving = 0.0;
+    let mut still = 0.0;
+    let mut present_nodes = 0usize;
+
+    for (&node_id, ns) in node_states.iter() {
+        let Some(last_seen) = ns.last_frame_time else {
+            continue;
+        };
+        if now.duration_since(last_seen) > ESP32_OFFLINE_TIMEOUT {
+            continue;
+        }
+
+        let w = node_geometry_weight(node_id);
+        match ns.current_motion_level.as_str() {
+            "active" | "present_moving" => {
+                present += w;
+                moving += w;
+                present_nodes += 1;
+            }
+            "present_still" => {
+                present += w;
+                still += w;
+                present_nodes += 1;
+            }
+            _ => {}
+        }
+    }
+
+    (present, moving, still, present_nodes)
+}
+
+/// Whether per-node evidence is strong enough to force the room `present`.
+/// Requires both weighted energy AND corroboration from ≥2 distinct nodes, so
+/// one flickering desk node (node 2 = 1.7, node 3 = 1.5, each ≥ 1.5 alone) can
+/// no longer latch presence on an otherwise empty room.
+fn node_present_evidence_sufficient(present_w: f64, present_node_count: usize) -> bool {
+    present_w >= 1.5 && present_node_count >= FORCE_PRESENT_MIN_NODES
+}
+
+/// Final room-level guard used after adaptive/edge-fused classification.
+///
+/// This keeps product-facing output from flipping on one noisy frame. It also
+/// uses geometry-weighted per-node evidence to prevent impossible states such as
+/// a fused `absent` while several fresh desk/LOS nodes are reporting presence.
+fn apply_room_level_guard(state: &mut AppStateInner, classification: &mut ClassificationInfo) {
+    let (present_w, moving_w, still_w, present_nodes) =
+        weighted_node_motion_evidence(&state.node_states);
+    let node_evidence_present = node_present_evidence_sufficient(present_w, present_nodes);
+
+    if classification.motion_level == "absent" && node_evidence_present {
+        classification.motion_level = if state.current_motion_level != "absent" {
+            state.current_motion_level.clone()
+        } else if moving_w >= still_w {
+            "present_moving".to_string()
+        } else {
+            "present_still".to_string()
+        };
+        classification.presence = true;
+        classification.confidence = classification.confidence.max(0.55);
+    }
+
+    let candidate = classification.motion_level.clone();
+    let node_forced_present = candidate != "absent" && node_evidence_present;
+    let required_frames = if candidate == "absent" {
+        ROOM_ABSENT_DEBOUNCE_FRAMES
+    } else if state.current_motion_level == "absent" {
+        DEBOUNCE_FRAMES
+    } else {
+        ROOM_PRESENT_DEBOUNCE_FRAMES
+    };
+
+    if candidate == state.current_motion_level {
+        state.debounce_counter = 0;
+        state.debounce_candidate = candidate.clone();
+    } else if candidate == state.debounce_candidate {
+        state.debounce_counter += 1;
+        if state.debounce_counter >= required_frames {
+            state.current_motion_level = candidate.clone();
+            state.debounce_counter = 0;
+        }
+    } else {
+        state.debounce_candidate = candidate.clone();
+        state.debounce_counter = 1;
+    }
+
+    classification.motion_level = state.current_motion_level.clone();
+    classification.presence = classification.motion_level != "absent";
+    if node_forced_present && !classification.presence {
+        classification.motion_level = candidate;
+        classification.presence = true;
+        classification.confidence = classification.confidence.max(0.55);
+    }
+    if classification.presence {
+        classification.confidence = classification.confidence.max(0.5);
     }
 }
 
@@ -3072,7 +3384,7 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
         let (features, mut classification, breathing_rate_hz, sub_variances, raw_motion) =
             extract_features_from_frame(&frame, &s_write_pre.frame_history, sample_rate_hz);
         smooth_and_classify(&mut s_write_pre, &mut classification, raw_motion);
-        adaptive_override(&s_write_pre, &features, &mut classification);
+        adaptive_override(&mut s_write_pre, &features, &mut classification);
         drop(s_write_pre);
 
         // ── Step 5: Build enhanced fields from pipeline result ───────
@@ -3179,18 +3491,24 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
             },
             node_features: None,
             room_inference: None,
+            desk_occupancy: None,
+            presence_gate: None,
         };
 
+        attach_desk_occupancy_with_memory(&mut s, &mut update);
         // Populate persons from the sensing update (Kalman-smoothed via tracker).
         let raw_persons = derive_pose_from_sensing(&update);
         let mut last_tracker_instant = s.last_tracker_instant.take();
-        let tracked = tracker_bridge::tracker_update(
+        let mut tracked = tracker_bridge::tracker_update(
             &mut s.pose_tracker,
             &mut last_tracker_instant,
             raw_persons,
         );
         s.last_tracker_instant = last_tracker_instant;
-        if !tracked.is_empty() {
+        tracked.truncate(pose_person_count(&update));
+        if !update.classification.presence {
+            update.persons = None;
+        } else if !tracked.is_empty() {
             update.persons = Some(tracked);
         }
         // #1050: attach real signal_field-peak positions to each person.
@@ -3259,7 +3577,7 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
     let (features, mut classification, breathing_rate_hz, sub_variances, raw_motion) =
         extract_features_from_frame(&frame, &s.frame_history, sample_rate_hz);
     smooth_and_classify(&mut s, &mut classification, raw_motion);
-    adaptive_override(&s, &features, &mut classification);
+    adaptive_override(&mut s, &features, &mut classification);
 
     s.source = format!("wifi:{ssid}");
     s.rssi_history.push_back(rssi_dbm);
@@ -3343,8 +3661,11 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
         },
         node_features: None,
         room_inference: None,
+        desk_occupancy: None,
+        presence_gate: None,
     };
 
+    attach_desk_occupancy_with_memory(&mut s, &mut update);
     let raw_persons = derive_pose_from_sensing(&update);
     let mut last_tracker_instant = s.last_tracker_instant.take();
     let tracked =
@@ -4942,18 +5263,1052 @@ fn assess_legacy_image_pose(state: &mut AppStateInner, update: &SensingUpdate) {
     }
 }
 
+fn pose_person_count(update: &SensingUpdate) -> usize {
+    // ESP32 CSI currently gives reliable room-level occupancy, not reliable
+    // multi-person instance separation. Cap synthetic pose rendering to the
+    // primary occupant so the UI doesn't turn multi-node evidence into phantom
+    // skeletons. Non-ESP32/demo paths keep the existing small multi-person cap.
+    if update.source.starts_with("esp32") {
+        1
+    } else {
+        update.estimated_persons.unwrap_or(1).clamp(1, 3)
+    }
+}
+
+const DESK_MEMORY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Interim empty-office energy thresholds. A *quiet* empty office (residual
+/// multipath below these floors) is NOT flagged as broad motion, which is why
+/// it used to slip through to the `seated_candidate` branch. These are a
+/// hand-tuned heuristic fitted to one office's 2026-06-29 captures and are
+/// superseded by the Phase-B learned `empty` class.
+const EMPTY_OFFICE_MOTION_BAND_FLOOR: f64 = 12.0;
+const EMPTY_OFFICE_BREATHING_BAND_FLOOR: f64 = 10.0;
+
+/// Fraction of the rolling desk window that must show NO node activity at all
+/// before the desk layer declares `absent` on its own. Independent of the
+/// top-level (possibly latched) presence flag — see `DeskFrameEvidence::any_node_present`.
+const EMPTY_EVIDENCE_ABSENT_FRACTION: f64 = 0.70;
+
+/// A confident, sustained away-from-desk read is treated as unoccupied (top-level
+/// presence clamped off) once it has been stable for at least this long. Kept
+/// conservative so a briefly-misread still person is never clamped.
+const AWAY_CLAMP_STABLE_SECS: f64 = 12.0;
+
+/// Room-guard force-present needs corroboration from at least this many distinct
+/// fresh nodes, so one flickering desk node (node 2 = 1.7, node 3 = 1.5) can no
+/// longer hold the whole room `present` on its own.
+const FORCE_PRESENT_MIN_NODES: usize = 2;
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn stddev(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let avg = mean(values);
+    (values.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / values.len() as f64).sqrt()
+}
+
+fn desk_discriminator_features(window: &[Vec<f64>]) -> Option<Vec<f64>> {
+    if window.len() != 20 || window.iter().any(|row| row.len() != 56) {
+        return None;
+    }
+    let flat: Vec<f64> = window.iter().flat_map(|row| row.iter().copied()).collect();
+    let mut sorted = flat.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let frame_means: Vec<f64> = window.iter().map(|row| mean(row)).collect();
+    let mut sub_means = Vec::with_capacity(56);
+    for sub in 0..56 {
+        sub_means.push(window.iter().map(|row| row[sub]).sum::<f64>() / 20.0);
+    }
+    let mut sub_means_sorted = sub_means.clone();
+    sub_means_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut diffs = Vec::with_capacity(19 * 56);
+    for rows in window.windows(2) {
+        for sub in 0..56 {
+            diffs.push(rows[1][sub] - rows[0][sub]);
+        }
+    }
+    let abs_diffs: Vec<f64> = diffs.iter().map(|v| v.abs()).collect();
+    let mut abs_diffs_sorted = abs_diffs.clone();
+    abs_diffs_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let band_stats = |start: usize, end: usize, stat: fn(&[f64]) -> f64| -> f64 {
+        let vals: Vec<f64> = window
+            .iter()
+            .flat_map(|row| row[start..end].iter().copied())
+            .collect();
+        stat(&vals)
+    };
+    let mut features = vec![
+        mean(&flat),
+        stddev(&flat),
+        percentile(&sorted, 0.50),
+        percentile(&sorted, 0.25),
+        percentile(&sorted, 0.75),
+        *sorted.last().unwrap_or(&0.0),
+        flat.iter().filter(|v| v.abs() < 1e-9).count() as f64 / flat.len() as f64,
+        mean(&frame_means),
+        stddev(&frame_means),
+        frame_means.iter().copied().fold(f64::INFINITY, f64::min),
+        frame_means.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        stddev(&sub_means),
+        percentile(&sub_means_sorted, 0.10),
+        percentile(&sub_means_sorted, 0.90),
+        mean(&abs_diffs),
+        stddev(&diffs),
+        percentile(&abs_diffs_sorted, 0.90),
+    ];
+    for (start, end) in [(0, 14), (14, 28), (28, 42), (42, 56)] {
+        features.push(band_stats(start, end, mean));
+    }
+    for (start, end) in [(0, 14), (14, 28), (28, 42), (42, 56)] {
+        features.push(band_stats(start, end, stddev));
+    }
+    Some(features)
+}
+
+fn update_desk_model_prediction(
+    memory: &mut DeskOccupancyMemory,
+    update: &SensingUpdate,
+    discriminator: Option<&DeskDiscriminator>,
+) -> Option<DeskModelPrediction> {
+    let discriminator = discriminator?;
+    for node in &update.nodes {
+        if node.amplitude.len() == 56 {
+            memory.csi_frames.push_back(node.amplitude.clone());
+        }
+    }
+    while memory.csi_frames.len() > 120 {
+        memory.csi_frames.pop_front();
+    }
+    if memory.csi_frames.len() < 20 {
+        return None;
+    }
+    let window: Vec<Vec<f64>> = memory.csi_frames.iter().rev().take(20).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+    let features = desk_discriminator_features(&window)?;
+    discriminator.predict(&features)
+}
+
+fn desk_frame_evidence(update: &SensingUpdate, now: std::time::Instant) -> Option<DeskFrameEvidence> {
+    if !update.source.starts_with("esp32") {
+        return None;
+    }
+
+    let mut moving_nodes = std::collections::HashSet::new();
+    let mut still_nodes = std::collections::HashSet::new();
+    let mut evidence_nodes = Vec::new();
+
+    if let Some(node_features) = &update.node_features {
+        for nf in node_features.iter().filter(|nf| !nf.stale) {
+            if matches!(nf.node_id, 1 | 2 | 3 | 4 | 6) {
+                evidence_nodes.push(nf.node_id);
+            }
+            match nf.classification.motion_level.as_str() {
+                "present_still" => {
+                    still_nodes.insert(nf.node_id);
+                }
+                "active" | "present_moving" => {
+                    moving_nodes.insert(nf.node_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    evidence_nodes.sort_unstable();
+    evidence_nodes.dedup();
+
+    let desk_los_present = [1_u8, 2, 3]
+        .iter()
+        .filter(|id| moving_nodes.contains(id) || still_nodes.contains(id))
+        .count();
+    let near_desk_still = [4_u8, 6]
+        .iter()
+        .filter(|id| still_nodes.contains(id))
+        .count();
+    // Broad all-node `present_moving` can mean two very different things in Dave's
+    // office:
+    //   1. an empty-office hard negative where every node reports noisy motion, and
+    //   2. a seated person at the desk whose per-node classifier is still too coarse
+    //      and marks every LOS/multipath witness as `present_moving`.
+    // Do not treat all-node motion alone as empty-office evidence.  Require the
+    // higher global motion/breathing energy observed in the empty-office false
+    // positive captures; the 2026-06-29 seated desk burst had all nodes moving but
+    // much lower aggregate motion energy, and should remain eligible for the seated
+    // branch instead of being product-clamped to absent.
+    let empty_office_energy_signature = update.features.motion_band_power
+        >= EMPTY_OFFICE_MOTION_BAND_FLOOR
+        || update.features.breathing_band_power >= EMPTY_OFFICE_BREATHING_BAND_FLOOR;
+    let broad_global_motion = moving_nodes.len() >= 5
+        && still_nodes.is_empty()
+        && empty_office_energy_signature;
+    let seated_candidate = update.classification.presence
+        && desk_los_present >= 2
+        && near_desk_still == 0
+        && !broad_global_motion;
+    // Raw per-node activity, independent of the top-level presence flag.
+    let any_node_present = !moving_nodes.is_empty() || !still_nodes.is_empty();
+
+    Some(DeskFrameEvidence {
+        at: now,
+        presence: update.classification.presence,
+        desk_los_present,
+        near_desk_still,
+        broad_global_motion,
+        seated_candidate,
+        any_node_present,
+        evidence_nodes,
+        model_label: None,
+        model_confidence: None,
+    })
+}
+
+fn derive_desk_occupancy(update: &SensingUpdate) -> Option<DeskOccupancyInfo> {
+    let now = std::time::Instant::now();
+    let evidence = desk_frame_evidence(update, now)?;
+
+    if !evidence.presence {
+        return Some(DeskOccupancyInfo {
+            state: "absent".to_string(),
+            seated: false,
+            confidence: update.classification.confidence.clamp(0.0, 1.0),
+            evidence_nodes: evidence.evidence_nodes,
+            note: "No room presence; desk is unoccupied".to_string(),
+            window_secs: None,
+            stable_for_secs: None,
+            votes: None,
+        });
+    }
+
+    let (state, seated, confidence, note) = if evidence.broad_global_motion {
+        (
+            "desk_like_uncertain",
+            false,
+            0.42_f64.max(update.classification.confidence * 0.45),
+            "Broad all-node motion matches empty/away false-positive patterns; not enough evidence to call desk seated",
+        )
+    } else if evidence.seated_candidate {
+        (
+            "desk_seated",
+            true,
+            0.78_f64.max(update.classification.confidence * 0.85),
+            "Desk LOS nodes 1/2/3 active with no near-desk standing signature on nodes 4/6",
+        )
+    } else if evidence.near_desk_still >= 1 {
+        (
+            "near_desk_not_seated",
+            false,
+            0.68_f64.max(update.classification.confidence * 0.75),
+            "Node 4/6 stillness matches the standing-near-desk negative sample",
+        )
+    } else if evidence.desk_los_present >= 2 {
+        (
+            "desk_like_uncertain",
+            false,
+            0.52_f64.max(update.classification.confidence * 0.55),
+            "Desk LOS activity is present but seated/away distinction is weak; use rolling history",
+        )
+    } else {
+        (
+            "away_or_unknown",
+            false,
+            0.45_f64.max(update.classification.confidence * 0.5),
+            "Presence detected without a strong desk signature",
+        )
+    };
+
+    Some(DeskOccupancyInfo {
+        state: state.to_string(),
+        seated,
+        confidence: confidence.clamp(0.0, 1.0),
+        evidence_nodes: evidence.evidence_nodes,
+        note: note.to_string(),
+        window_secs: None,
+        stable_for_secs: None,
+        votes: None,
+    })
+}
+
+fn strong_model_seated_override(votes: &DeskOccupancyVotes, model_seated_conf: f64) -> bool {
+    let model_seated = votes.model_seated.unwrap_or(0.0);
+    let model_standing = votes.model_standing_near.unwrap_or(0.0);
+    let model_away = votes.model_away.unwrap_or(0.0);
+
+    model_seated >= 0.75
+        && model_seated_conf >= 0.70
+        && model_seated - model_standing >= 0.35
+        && model_seated - model_away >= 0.50
+        && model_standing < 0.30
+        && model_away < 0.20
+        && votes.presence >= 0.75
+        && votes.desk_los >= 0.60
+        && votes.near_desk_not_seated < 0.35
+        && votes.absent < 0.20
+}
+
+#[cfg(test)]
+mod desk_occupancy_decision_tests {
+    use super::{strong_model_seated_override, DeskOccupancyVotes};
+
+    fn votes() -> DeskOccupancyVotes {
+        DeskOccupancyVotes {
+            presence: 1.0,
+            absent: 0.0,
+            desk_los: 1.0,
+            broad_uncertain: 1.0,
+            near_desk_not_seated: 0.0,
+            seated_candidate: 0.0,
+            model_seated: Some(0.94),
+            model_away: Some(0.01),
+            model_standing_near: Some(0.05),
+        }
+    }
+
+    #[test]
+    fn strong_model_seated_overrides_broad_uncertain_guard() {
+        assert!(strong_model_seated_override(&votes(), 0.94));
+    }
+
+    #[test]
+    fn strong_model_seated_does_not_override_standing_near_evidence() {
+        let mut votes = votes();
+        votes.model_standing_near = Some(0.50);
+        assert!(!strong_model_seated_override(&votes, 0.94));
+    }
+}
+
+fn derive_desk_occupancy_with_memory(
+    memory: &mut DeskOccupancyMemory,
+    update: &SensingUpdate,
+) -> Option<DeskOccupancyInfo> {
+    derive_desk_occupancy_with_memory_and_model(memory, update, None)
+}
+
+fn derive_desk_occupancy_with_memory_and_model(
+    memory: &mut DeskOccupancyMemory,
+    update: &SensingUpdate,
+    discriminator: Option<&DeskDiscriminator>,
+) -> Option<DeskOccupancyInfo> {
+    let now = std::time::Instant::now();
+    let model_prediction = update_desk_model_prediction(memory, update, discriminator);
+    let mut evidence = desk_frame_evidence(update, now)?;
+    if let Some(prediction) = model_prediction {
+        evidence.model_label = Some(prediction.label);
+        evidence.model_confidence = Some(prediction.confidence);
+    }
+    memory.frames.push_back(evidence);
+    while memory
+        .frames
+        .front()
+        .is_some_and(|f| now.duration_since(f.at) > DESK_MEMORY_WINDOW)
+    {
+        memory.frames.pop_front();
+    }
+
+    let total = memory.frames.len().max(1) as f64;
+    let count = |pred: fn(&DeskFrameEvidence) -> bool| -> f64 {
+        memory.frames.iter().filter(|f| pred(f)).count() as f64 / total
+    };
+    let votes = DeskOccupancyVotes {
+        presence: count(|f| f.presence),
+        absent: count(|f| !f.presence),
+        desk_los: count(|f| f.desk_los_present >= 2),
+        broad_uncertain: count(|f| f.broad_global_motion),
+        near_desk_not_seated: count(|f| f.near_desk_still >= 1),
+        seated_candidate: count(|f| f.seated_candidate),
+        model_seated: None,
+        model_away: None,
+        model_standing_near: None,
+    };
+    // Independent empty signal: fraction of frames where NO node reported any
+    // activity. Not derived from the guarded presence, so it can reach `absent`
+    // even when the room guard has latched presence on (breaks that feedback loop).
+    let empty_evidence = count(|f| !f.any_node_present);
+    let model_total = memory.frames.iter().filter(|f| f.model_label.is_some()).count().max(1) as f64;
+    let model_fraction = |label: &str| -> Option<f64> {
+        let labelled = memory.frames.iter().filter(|f| f.model_label.is_some()).count();
+        if labelled == 0 {
+            None
+        } else {
+            Some(memory.frames.iter().filter(|f| f.model_label.as_deref() == Some(label)).count() as f64 / model_total)
+        }
+    };
+    let model_confidence = |label: &str| -> Option<f64> {
+        let vals: Vec<f64> = memory
+            .frames
+            .iter()
+            .filter(|f| f.model_label.as_deref() == Some(label))
+            .filter_map(|f| f.model_confidence)
+            .collect();
+        if vals.is_empty() { None } else { Some(mean(&vals)) }
+    };
+    let votes = DeskOccupancyVotes {
+        model_seated: model_fraction("seated"),
+        model_away: model_fraction("away"),
+        model_standing_near: model_fraction("standing_near"),
+        ..votes
+    };
+    let model_seated_conf = model_confidence("seated").unwrap_or(0.0);
+    let model_standing_conf = model_confidence("standing_near").unwrap_or(0.0);
+    let model_away_conf = model_confidence("away").unwrap_or(0.0);
+
+    let mut evidence_nodes: Vec<u8> = memory
+        .frames
+        .iter()
+        .flat_map(|f| f.evidence_nodes.iter().copied())
+        .collect();
+    evidence_nodes.sort_unstable();
+    evidence_nodes.dedup();
+
+    let window_secs = memory
+        .frames
+        .front()
+        .map(|f| now.duration_since(f.at).as_secs_f64())
+        .unwrap_or(0.0);
+
+    let conservative_seated_evidence = votes.presence >= 0.75
+        && votes.desk_los >= 0.60
+        && votes.seated_candidate >= 0.35
+        && votes.near_desk_not_seated < 0.35
+        && votes.broad_uncertain < 0.70
+        && votes.absent < 0.20;
+    let strong_model_seated_override = strong_model_seated_override(&votes, model_seated_conf);
+
+    let (candidate_state, seated, confidence, note) = if empty_evidence
+        >= EMPTY_EVIDENCE_ABSENT_FRACTION
+    {
+        (
+            "absent",
+            false,
+            (0.55 + empty_evidence * 0.40).clamp(0.0, 1.0),
+            "No witness node reported activity across the rolling window; room appears empty",
+        )
+    } else if strong_model_seated_override {
+        (
+            "desk_seated",
+            true,
+            (0.58 + model_seated_conf * 0.38).clamp(0.0, 1.0),
+            "Strong camera-supervised CSI seated evidence overrides the broad-motion guard",
+        )
+    } else if votes
+        .model_seated
+        .is_some_and(|v| v >= 0.60)
+        && model_seated_conf >= 0.70
+        && conservative_seated_evidence
+    {
+        (
+            "desk_seated",
+            true,
+            (0.55 + model_seated_conf * 0.40).clamp(0.0, 1.0),
+            "Camera-supervised CSI desk discriminator agrees with sustained seated-candidate desk evidence",
+        )
+    } else if votes
+        .model_standing_near
+        .is_some_and(|v| v >= 0.50)
+    {
+        (
+            "near_desk_not_seated",
+            false,
+            (0.50 + model_standing_conf * 0.35).clamp(0.0, 1.0),
+            "Camera-supervised CSI desk discriminator sees standing-near-desk windows",
+        )
+    } else if votes.model_away.is_some_and(|v| v >= 0.60) {
+        (
+            "away_or_unknown",
+            false,
+            (0.45 + model_away_conf * 0.35).clamp(0.0, 1.0),
+            "Camera-supervised CSI desk discriminator sees away-from-desk windows",
+        )
+    } else if votes.absent >= 0.70 {
+        (
+            "absent",
+            false,
+            (0.55 + votes.absent * 0.4).clamp(0.0, 1.0),
+            "Rolling window is mostly absent; desk is unoccupied",
+        )
+    } else if votes.broad_uncertain >= 0.85
+        && votes.seated_candidate < 0.10
+        && votes.near_desk_not_seated < 0.20
+    {
+        (
+            "desk_like_uncertain",
+            false,
+            (0.45 + votes.broad_uncertain * 0.25).clamp(0.0, 0.75),
+            "Full-office broad motion is ambiguous between empty-room noise and seated desk presence; refusing to call seated or absent",
+        )
+    } else if votes.presence >= 0.75
+        && votes.desk_los >= 0.60
+        && votes.seated_candidate >= 0.45
+        && votes.absent < 0.20
+        && votes.near_desk_not_seated < 0.35
+    {
+        (
+            "desk_seated",
+            true,
+            (0.55 + votes.seated_candidate * 0.45).clamp(0.0, 1.0),
+            "Rolling desk window has sustained desk LOS presence without the near-desk-standing signature",
+        )
+    } else if votes.presence >= 0.60 && votes.near_desk_not_seated >= 0.35 {
+        (
+            "near_desk_not_seated",
+            false,
+            (0.50 + votes.near_desk_not_seated * 0.45).clamp(0.0, 1.0),
+            "Rolling window is present but node 4/6 stillness matches standing-near-desk negatives",
+        )
+    } else if votes.presence >= 0.50 {
+        (
+            "desk_like_uncertain",
+            false,
+            (0.38 + votes.presence * 0.25).clamp(0.0, 1.0),
+            "Rolling window sees presence-like desk evidence but not enough stable seated votes yet",
+        )
+    } else {
+        (
+            "away_or_unknown",
+            false,
+            0.45,
+            "Rolling window lacks a stable desk signature",
+        )
+    };
+
+    if memory.stable_state != candidate_state {
+        memory.stable_state = candidate_state.to_string();
+        memory.stable_since = Some(now);
+    } else if memory.stable_since.is_none() {
+        memory.stable_since = Some(now);
+    }
+
+    let stable_for_secs = memory
+        .stable_since
+        .map(|t| now.duration_since(t).as_secs_f64())
+        .unwrap_or(0.0);
+
+    Some(DeskOccupancyInfo {
+        state: candidate_state.to_string(),
+        seated,
+        confidence,
+        evidence_nodes,
+        note: note.to_string(),
+        window_secs: Some(window_secs),
+        stable_for_secs: Some(stable_for_secs),
+        votes: Some(votes),
+    })
+}
+
+fn attach_desk_occupancy(update: &mut SensingUpdate) {
+    update.desk_occupancy = derive_desk_occupancy(update);
+}
+
+fn attach_desk_occupancy_with_memory(state: &mut AppStateInner, update: &mut SensingUpdate) {
+    update.desk_occupancy = derive_desk_occupancy_with_memory_and_model(
+        &mut state.desk_occupancy_memory,
+        update,
+        state.desk_discriminator.as_ref(),
+    );
+    apply_product_absence_clamp(update);
+
+    // R3 camera-anchored empty-baseline gate: feed this tick's per-node
+    // amplitudes, evaluate, surface the state, and clamp presence off on a
+    // sustained quorum-backed Empty verdict. The gate NEVER forces presence
+    // on, and a stale/missing baseline yields Uncertain (no action) — so this
+    // block can only reduce false-presence, not create false-absence beyond
+    // the offline-validated vote rule.
+    let now = std::time::Instant::now();
+    for node in &update.nodes {
+        state
+            .presence_gate
+            .push_frame(node.node_id, &node.amplitude, now);
+    }
+    let gate_info = state.presence_gate.evaluate(now);
+    update.presence_gate = Some(gate_info);
+    if state.presence_gate.should_clamp_absent() && update.classification.presence {
+        update.classification.motion_level = "absent".to_string();
+        update.classification.presence = false;
+        update.vital_signs = None;
+        update.estimated_persons = None;
+        update.persons = None;
+    }
+}
+
+fn product_absence_clamped(update: &SensingUpdate) -> bool {
+    let Some(desk) = update.desk_occupancy.as_ref() else {
+        return false;
+    };
+    if desk.seated {
+        return false;
+    }
+    // 1. Explicit empty/absent desk state.
+    if desk.state == "absent" {
+        return true;
+    }
+    // 2. Sustained, confident away-from-desk with no seated evidence. Without
+    //    this the top-level presence flag stays latched `true` while the desk
+    //    layer says "away_or_unknown" — the primary empty-office mismatch.
+    //    Conservative: needs the camera-supervised model to agree it is away,
+    //    no seated candidacy, and the state stable for AWAY_CLAMP_STABLE_SECS.
+    if desk.state == "away_or_unknown" {
+        if let Some(votes) = desk.votes.as_ref() {
+            let sustained = desk.stable_for_secs.unwrap_or(0.0) >= AWAY_CLAMP_STABLE_SECS;
+            let model_says_away = votes.model_away.unwrap_or(0.0) >= 0.60;
+            let no_seated_evidence = votes.seated_candidate < 0.15;
+            if sustained && model_says_away && no_seated_evidence {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn effective_product_absent(update: &SensingUpdate) -> bool {
+    if product_absence_clamped(update) {
+        return true;
+    }
+    // The R3 camera-anchored baseline gate can clamp the top-level product
+    // classification after desk occupancy has been derived. REST projections
+    // (`/nodes`, `/vital-signs`) must honour that final user-facing state even
+    // when raw per-node diagnostics still look presence-like.
+    !update.classification.presence && update.classification.motion_level == "absent"
+}
+
+fn apply_product_absence_clamp(update: &mut SensingUpdate) {
+    if !product_absence_clamped(update) {
+        return;
+    }
+
+    update.classification.motion_level = "absent".to_string();
+    update.classification.presence = false;
+    update.classification.confidence = update
+        .desk_occupancy
+        .as_ref()
+        .map(|desk| desk.confidence.clamp(0.0, 1.0))
+        .unwrap_or(update.classification.confidence);
+    update.vital_signs = None;
+    update.estimated_persons = None;
+    update.persons = None;
+}
+
 fn derive_pose_from_sensing(update: &SensingUpdate) -> Vec<PersonDetection> {
     let cls = &update.classification;
     if !cls.presence {
         return vec![];
     }
 
-    // Use estimated_persons if set by the tick loop; otherwise default to 1.
-    let person_count = update.estimated_persons.unwrap_or(1).max(1);
+    let person_count = pose_person_count(update);
 
     (0..person_count)
         .map(|idx| derive_single_person_pose(update, idx, person_count))
         .collect()
+}
+
+#[cfg(test)]
+mod ruview_room_fusion_tests {
+    use super::*;
+
+    fn test_update(source: &str, estimated_persons: Option<usize>) -> SensingUpdate {
+        SensingUpdate {
+            room_inference: None,
+            msg_type: "sensing_update".to_string(),
+            timestamp: 0.0,
+            source: source.to_string(),
+            tick: 0,
+            nodes: vec![],
+            features: FeatureInfo {
+                mean_rssi: -50.0,
+                variance: 0.0,
+                motion_band_power: 0.0,
+                breathing_band_power: 0.0,
+                dominant_freq_hz: 0.0,
+                change_points: 0,
+                spectral_power: 0.0,
+            },
+            classification: ClassificationInfo {
+                motion_level: "present_still".to_string(),
+                presence: true,
+                confidence: 0.8,
+            },
+            signal_field: SignalField {
+                grid_size: [1, 1, 1],
+                values: vec![0.0],
+            },
+            vital_signs: None,
+            enhanced_motion: None,
+            enhanced_breathing: None,
+            posture: None,
+            signal_quality_score: None,
+            quality_verdict: None,
+            bssid_count: None,
+            pose_keypoints: None,
+            model_status: None,
+            persons: None,
+            estimated_persons,
+            node_features: None,
+            desk_occupancy: None,
+            presence_gate: None,
+        }
+    }
+
+    #[test]
+    fn esp32_synthetic_pose_is_capped_to_primary_person() {
+        let update = test_update("esp32", Some(7));
+        assert_eq!(pose_person_count(&update), 1);
+    }
+
+    #[test]
+    fn non_esp32_pose_count_keeps_small_cap() {
+        let update = test_update("simulated", Some(7));
+        assert_eq!(pose_person_count(&update), 3);
+    }
+
+    #[test]
+    fn office_geometry_weights_desk_nodes_above_dead_angle_node() {
+        assert!(node_geometry_weight(2) > node_geometry_weight(1));
+        assert!(node_geometry_weight(3) > node_geometry_weight(1));
+        assert!(node_geometry_weight(5) < node_geometry_weight(1));
+    }
+
+    fn test_node_feature(node_id: u8, motion_level: &str) -> PerNodeFeatureInfo {
+        PerNodeFeatureInfo {
+            node_id,
+            features: FeatureInfo {
+                mean_rssi: -50.0,
+                variance: 10.0,
+                motion_band_power: 30.0,
+                breathing_band_power: 10.0,
+                dominant_freq_hz: 0.8,
+                change_points: 3,
+                spectral_power: 40.0,
+            },
+            classification: ClassificationInfo {
+                motion_level: motion_level.to_string(),
+                presence: motion_level != "absent",
+                confidence: 0.75,
+            },
+            rssi_dbm: -50.0,
+            last_seen_ms: 10,
+            frame_rate_hz: 10.0,
+            stale: false,
+            novelty_score: None,
+        }
+    }
+
+    fn test_desk_discriminator(label: &str) -> DeskDiscriminator {
+        let classes = vec!["seated".to_string(), "away".to_string(), "standing_near".to_string()];
+        let mut intercept = vec![0.0, 0.0, 0.0];
+        let idx = classes.iter().position(|c| c == label).unwrap();
+        intercept[idx] = 10.0;
+        DeskDiscriminator {
+            artifact: DeskDiscriminatorArtifact {
+                classes,
+                standardization: DeskDiscriminatorStandardization {
+                    mean: vec![0.0; 25],
+                    scale: vec![1.0; 25],
+                },
+                model: DeskDiscriminatorModel {
+                    coef: vec![vec![0.0; 25]; 3],
+                    intercept,
+                },
+            },
+        }
+    }
+
+    fn add_test_csi_node(update: &mut SensingUpdate, amplitude: f64) {
+        update.nodes = vec![NodeInfo {
+            node_inference: None,
+            node_id: 2,
+            rssi_dbm: -50.0,
+            position: [0.0, 0.0, 0.0],
+            amplitude: vec![amplitude; 56],
+            subcarrier_count: 56,
+            sync: None,
+        }];
+    }
+
+    #[test]
+    fn desk_discriminator_seated_requires_conservative_seated_evidence() {
+        let discriminator = test_desk_discriminator("seated");
+        let mut memory = DeskOccupancyMemory::new();
+        let mut result = None;
+
+        for i in 0..20 {
+            let mut update = test_update("esp32", Some(1));
+            add_test_csi_node(&mut update, i as f64);
+            update.node_features = Some(vec![
+                test_node_feature(1, "present_moving"),
+                test_node_feature(2, "present_moving"),
+                test_node_feature(3, "present_moving"),
+                test_node_feature(4, "present_moving"),
+                test_node_feature(5, "present_moving"),
+                test_node_feature(6, "present_moving"),
+            ]);
+            result = derive_desk_occupancy_with_memory_and_model(
+                &mut memory,
+                &update,
+                Some(&discriminator),
+            );
+        }
+
+        let desk = result.unwrap();
+        assert_eq!(desk.state, "desk_seated");
+        assert!(desk.seated);
+        assert_eq!(desk.votes.unwrap().model_seated, Some(1.0));
+    }
+
+    #[test]
+    fn desk_discriminator_seated_is_downgraded_when_near_desk_negative_dominates() {
+        let discriminator = test_desk_discriminator("seated");
+        let mut memory = DeskOccupancyMemory::new();
+        let mut result = None;
+
+        for i in 0..20 {
+            let mut update = test_update("esp32", Some(1));
+            add_test_csi_node(&mut update, i as f64);
+            update.node_features = Some(vec![
+                test_node_feature(1, "present_moving"),
+                test_node_feature(2, "present_moving"),
+                test_node_feature(3, "present_moving"),
+                test_node_feature(4, "present_still"),
+                test_node_feature(5, "present_moving"),
+                test_node_feature(6, "present_still"),
+            ]);
+            result = derive_desk_occupancy_with_memory_and_model(
+                &mut memory,
+                &update,
+                Some(&discriminator),
+            );
+        }
+
+        let desk = result.unwrap();
+        let votes = desk.votes.unwrap();
+        assert_eq!(votes.model_seated, Some(1.0));
+        assert!(votes.near_desk_not_seated >= 0.90);
+        assert!(votes.seated_candidate < 0.10);
+        assert_eq!(desk.state, "near_desk_not_seated");
+        assert!(!desk.seated);
+    }
+
+    #[test]
+    fn desk_discriminator_standing_near_prevents_seated_state() {
+        let discriminator = test_desk_discriminator("standing_near");
+        let mut memory = DeskOccupancyMemory::new();
+        let mut result = None;
+
+        for i in 0..20 {
+            let mut update = test_update("esp32", Some(1));
+            add_test_csi_node(&mut update, i as f64);
+            update.node_features = Some(vec![
+                test_node_feature(1, "present_still"),
+                test_node_feature(2, "present_still"),
+                test_node_feature(3, "present_still"),
+            ]);
+            result = derive_desk_occupancy_with_memory_and_model(
+                &mut memory,
+                &update,
+                Some(&discriminator),
+            );
+        }
+
+        let desk = result.unwrap();
+        assert_eq!(desk.state, "near_desk_not_seated");
+        assert!(!desk.seated);
+        assert_eq!(desk.votes.unwrap().model_standing_near, Some(1.0));
+    }
+
+    #[test]
+    fn broad_empty_office_motion_reports_uncertain_not_absent() {
+        let mut memory = DeskOccupancyMemory::new();
+        let mut update = test_update("esp32", Some(2));
+        update.features.motion_band_power = 24.0;
+        update.features.breathing_band_power = 20.0;
+        update.node_features = Some(vec![
+            test_node_feature(1, "present_moving"),
+            test_node_feature(2, "present_moving"),
+            test_node_feature(3, "present_moving"),
+            test_node_feature(4, "present_moving"),
+            test_node_feature(5, "present_moving"),
+            test_node_feature(6, "present_moving"),
+        ]);
+
+        update.desk_occupancy = derive_desk_occupancy_with_memory(&mut memory, &update);
+        apply_product_absence_clamp(&mut update);
+
+        assert_eq!(update.classification.motion_level, "present_still");
+        assert!(update.classification.presence);
+        assert_eq!(update.estimated_persons, Some(2));
+        assert!(update.vital_signs.is_none());
+        assert!(update.persons.is_none());
+        assert_eq!(update.desk_occupancy.as_ref().unwrap().state, "desk_like_uncertain");
+        assert!(!update.desk_occupancy.as_ref().unwrap().seated);
+    }
+
+    #[test]
+    fn all_node_low_energy_seated_desk_burst_is_not_clamped_absent() {
+        let mut memory = DeskOccupancyMemory::new();
+        let mut update = test_update("esp32", Some(1));
+        update.features.motion_band_power = 7.5;
+        update.features.breathing_band_power = 0.01;
+        update.node_features = Some(vec![
+            test_node_feature(1, "present_moving"),
+            test_node_feature(2, "present_moving"),
+            test_node_feature(3, "present_moving"),
+            test_node_feature(4, "present_moving"),
+            test_node_feature(5, "present_moving"),
+            test_node_feature(6, "present_moving"),
+        ]);
+
+        update.desk_occupancy = derive_desk_occupancy_with_memory(&mut memory, &update);
+        apply_product_absence_clamp(&mut update);
+
+        assert_eq!(update.classification.motion_level, "present_still");
+        assert!(update.classification.presence);
+        assert_eq!(update.estimated_persons, Some(1));
+        assert_eq!(update.desk_occupancy.as_ref().unwrap().state, "desk_seated");
+    }
+
+    #[test]
+    fn seated_candidate_is_not_clamped_absent() {
+        let mut memory = DeskOccupancyMemory::new();
+        let mut update = test_update("esp32", Some(1));
+        update.node_features = Some(vec![
+            test_node_feature(1, "present_still"),
+            test_node_feature(2, "present_still"),
+            test_node_feature(3, "present_still"),
+            test_node_feature(4, "absent"),
+            test_node_feature(5, "absent"),
+            test_node_feature(6, "absent"),
+        ]);
+
+        update.desk_occupancy = derive_desk_occupancy_with_memory(&mut memory, &update);
+        apply_product_absence_clamp(&mut update);
+
+        assert_eq!(update.classification.motion_level, "present_still");
+        assert!(update.classification.presence);
+        assert_eq!(update.desk_occupancy.as_ref().unwrap().state, "desk_seated");
+    }
+
+    #[test]
+    fn empty_office_idle_nodes_report_absent_and_clamp_presence() {
+        // Every witness node idle for the whole rolling window => the desk layer
+        // reaches `absent` via the independent empty signal (not the guarded
+        // presence flag), and the clamp turns top-level presence off.
+        let mut memory = DeskOccupancyMemory::new();
+        let mut update = test_update("esp32", Some(1));
+        for _ in 0..20 {
+            update = test_update("esp32", Some(1));
+            update.node_features = Some(vec![
+                test_node_feature(1, "absent"),
+                test_node_feature(2, "absent"),
+                test_node_feature(3, "absent"),
+                test_node_feature(4, "absent"),
+                test_node_feature(5, "absent"),
+                test_node_feature(6, "absent"),
+            ]);
+            update.desk_occupancy = derive_desk_occupancy_with_memory(&mut memory, &update);
+        }
+        apply_product_absence_clamp(&mut update);
+
+        assert_eq!(update.desk_occupancy.as_ref().unwrap().state, "absent");
+        assert!(!update.classification.presence);
+        assert_eq!(update.classification.motion_level, "absent");
+        assert!(update.vital_signs.is_none());
+    }
+
+    #[test]
+    fn single_high_weight_node_does_not_force_present() {
+        // One desk node alone (node 2 = 1.7, node 3 = 1.5) clears the old
+        // present_w >= 1.5 bar but must NOT force the room present anymore.
+        assert!(!node_present_evidence_sufficient(node_geometry_weight(2), 1));
+        assert!(!node_present_evidence_sufficient(node_geometry_weight(3), 1));
+        // Two corroborating nodes are sufficient.
+        assert!(node_present_evidence_sufficient(2.0, 2));
+    }
+
+    fn away_desk_occupancy(stable_for_secs: f64) -> DeskOccupancyInfo {
+        DeskOccupancyInfo {
+            state: "away_or_unknown".to_string(),
+            seated: false,
+            confidence: 0.6,
+            evidence_nodes: vec![1, 2, 3],
+            note: "test".to_string(),
+            window_secs: Some(30.0),
+            stable_for_secs: Some(stable_for_secs),
+            votes: Some(DeskOccupancyVotes {
+                presence: 0.9,
+                absent: 0.0,
+                desk_los: 0.2,
+                broad_uncertain: 0.0,
+                near_desk_not_seated: 0.0,
+                seated_candidate: 0.0,
+                model_seated: Some(0.0),
+                model_away: Some(0.8),
+                model_standing_near: Some(0.0),
+            }),
+        }
+    }
+
+    #[test]
+    fn sustained_confident_away_clamps_presence() {
+        let mut update = test_update("esp32", Some(1));
+        update.desk_occupancy = Some(away_desk_occupancy(AWAY_CLAMP_STABLE_SECS + 3.0));
+        apply_product_absence_clamp(&mut update);
+
+        assert!(!update.classification.presence);
+        assert_eq!(update.classification.motion_level, "absent");
+        assert!(update.vital_signs.is_none());
+    }
+
+    #[test]
+    fn effective_absence_honours_baseline_gate_clamped_classification() {
+        let mut update = test_update("esp32", Some(1));
+        update.classification.motion_level = "absent".to_string();
+        update.classification.presence = false;
+        update.desk_occupancy = None;
+
+        assert!(effective_product_absent(&update));
+    }
+
+    #[test]
+    fn effective_absence_does_not_hide_non_absent_no_presence_states() {
+        let mut update = test_update("esp32", Some(1));
+        update.classification.motion_level = "present_still".to_string();
+        update.classification.presence = false;
+        update.desk_occupancy = None;
+
+        assert!(!effective_product_absent(&update));
+    }
+
+    #[test]
+    fn effective_absence_keeps_desk_clamp_path() {
+        let mut update = test_update("esp32", Some(1));
+        update.desk_occupancy = Some(away_desk_occupancy(AWAY_CLAMP_STABLE_SECS + 3.0));
+
+        assert!(effective_product_absent(&update));
+    }
+
+    #[test]
+    fn brief_away_does_not_clamp_presence() {
+        // Over-clamp guard: a not-yet-sustained away read must leave presence on.
+        let mut update = test_update("esp32", Some(1));
+        update.desk_occupancy = Some(away_desk_occupancy(3.0));
+        apply_product_absence_clamp(&mut update);
+
+        assert!(update.classification.presence);
+        assert_ne!(update.classification.motion_level, "absent");
+    }
 }
 
 // ── RuVector Phase 2: Temporal EMA smoothing for keypoints ──────────────────
@@ -5674,16 +7029,28 @@ fn scan_recording_files() -> Vec<serde_json::Value> {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                // Count lines (frames) — approximate for large files
-                let frame_count = std::fs::read_to_string(&path)
-                    .map(|s| s.lines().count())
-                    .unwrap_or(0);
+                // Startup safety: recordings can be hundreds of MB each during
+                // empty-room capture weekends. Never read full JSONL bodies just
+                // to populate metadata; that blocks API startup for minutes and
+                // can make restarts look dead. Keep exact counts only for small
+                // files and use metadata-only rows for large captures.
+                let (frame_count, frames_estimated) = if size <= 50 * 1024 * 1024 {
+                    (
+                        std::fs::read_to_string(&path)
+                            .map(|s| s.lines().count())
+                            .unwrap_or(0),
+                        false,
+                    )
+                } else {
+                    (0, true)
+                };
                 recordings.push(serde_json::json!({
                     "id": name,
                     "name": name,
                     "path": path.display().to_string(),
                     "size_bytes": size,
                     "frames": frame_count,
+                    "frames_estimated": frames_estimated,
                     "modified_epoch": modified,
                     "status": "completed",
                 }));
@@ -5752,6 +7119,39 @@ async fn adaptive_train(State(state): State<SharedState>) -> Json<serde_json::Va
 }
 
 /// GET /api/v1/adaptive/status — check adaptive model status.
+/// POST /api/v1/presence/baseline/capture — begin an empty-baseline capture.
+///
+/// Called by the external emptiness oracle (camera today, mmWave later) when
+/// it has confirmed the room is empty. Body: `{"duration_secs": 30.0}`
+/// (optional). The gate freezes per-node references when the window closes.
+async fn presence_baseline_capture(
+    State(state): State<SharedState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let duration = body
+        .get("duration_secs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(presence_baseline::CAPTURE_SECS_DEFAULT);
+    let mut s = state.write().await;
+    s.presence_gate
+        .start_capture(std::time::Instant::now(), duration);
+    info!("presence gate: empty-baseline capture started ({duration:.0}s)");
+    Json(serde_json::json!({
+        "success": true,
+        "capturing": true,
+        "duration_secs": duration,
+    }))
+}
+
+/// GET /api/v1/presence/baseline/status — gate + baseline state.
+async fn presence_baseline_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let s = state.read().await;
+    Json(serde_json::json!({
+        "capturing": s.presence_gate.is_capturing(),
+        "gate": s.presence_gate.last_info(),
+    }))
+}
+
 async fn adaptive_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     match &s.adaptive_model {
@@ -5891,16 +7291,31 @@ fn chrono_timestamp() -> u64 {
 
 async fn vital_signs_endpoint(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
-    let vs = &s.latest_vitals;
     let (br_len, br_cap, hb_len, hb_cap) = s.vital_detector.buffer_status();
-    Json(serde_json::json!({
-        "vital_signs": {
+    let product_absent = s
+        .latest_update
+        .as_ref()
+        .is_some_and(effective_product_absent);
+    let vital_signs = if product_absent {
+        serde_json::json!({
+            "breathing_rate_bpm": null,
+            "heart_rate_bpm": null,
+            "breathing_confidence": 0.0,
+            "heartbeat_confidence": 0.0,
+            "signal_quality": 0.0,
+        })
+    } else {
+        let vs = &s.latest_vitals;
+        serde_json::json!({
             "breathing_rate_bpm": vs.breathing_rate_bpm,
             "heart_rate_bpm": vs.heart_rate_bpm,
             "breathing_confidence": vs.breathing_confidence,
             "heartbeat_confidence": vs.heartbeat_confidence,
             "signal_quality": vs.signal_quality,
-        },
+        })
+    };
+    Json(serde_json::json!({
+        "vital_signs": vital_signs,
         "buffer_status": {
             "breathing_samples": br_len,
             "breathing_capacity": br_cap,
@@ -6220,6 +7635,10 @@ async fn mesh_endpoint(State(state): State<SharedState>) -> Json<serde_json::Val
 async fn nodes_endpoint(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     let now = std::time::Instant::now();
+    let product_absent = s
+        .latest_update
+        .as_ref()
+        .is_some_and(effective_product_absent);
     let nodes: Vec<serde_json::Value> = s
         .node_states
         .iter()
@@ -6231,13 +7650,19 @@ async fn nodes_endpoint(State(state): State<SharedState>) -> Json<serde_json::Va
             let stale = elapsed_ms > 5000;
             let status = if stale { "stale" } else { "active" };
             let rssi = ns.rssi_history.back().copied().unwrap_or(-90.0);
+            let motion_level = if product_absent {
+                "absent"
+            } else {
+                ns.current_motion_level.as_str()
+            };
+            let person_count = if product_absent { 0 } else { ns.prev_person_count };
             serde_json::json!({
                 "node_id": id,
                 "status": status,
                 "last_seen_ms": elapsed_ms,
                 "rssi_dbm": rssi,
-                "motion_level": &ns.current_motion_level,
-                "person_count": ns.prev_person_count,
+                "motion_level": motion_level,
+                "person_count": person_count,
                 "person_count_valid": ns.edge_vitals
                     .as_ref()
                     .map(|vitals| vitals.person_count_valid),
@@ -6568,7 +7993,20 @@ async fn udp_receiver_task(
                     // node's own reading no longer overwrites the room's. The
                     // old ad-hoc "boost confidence by node count" is replaced by
                     // `room_inference`'s freshness-weighted multi-node confidence.
-                    let classification = classification_from_room(&room_inference);
+                    let mut classification = classification_from_room(&room_inference);
+
+                    // REBASE NOTE (2026-09-01): ADR-297 supersedes the local
+                    // `classify_vitals` + node-count boost, so both are dropped
+                    // here. `classification_from_room` is a pure projection with
+                    // no debounce and no node-evidence corroboration, and
+                    // upstream has no equivalent, so the room-level guard is
+                    // retained on top of the fused aggregate rather than
+                    // discarded. Ordering matters: the guard can still force
+                    // `present` when the aggregate says `absent` but
+                    // FORCE_PRESENT_MIN_NODES fresh nodes disagree. Verify on
+                    // hardware that this does not reintroduce the empty-room
+                    // false positive that the R3 baseline gate exists to close.
+                    apply_room_level_guard(&mut s, &mut classification);
 
                     let signal_field = generate_signal_field(
                         fused_features.mean_rssi,
@@ -6623,17 +8061,23 @@ async fn udp_receiver_task(
                         // tripping back to the server.
                         node_features: build_node_features(&s.node_states, now),
                         room_inference: Some(room_inference),
+                        desk_occupancy: None,
+                        presence_gate: None,
                     };
 
+                    attach_desk_occupancy_with_memory(&mut s, &mut update);
                     let raw_persons = derive_pose_from_sensing(&update);
                     let mut last_tracker_instant = s.last_tracker_instant.take();
-                    let tracked = tracker_bridge::tracker_update(
+                    let mut tracked = tracker_bridge::tracker_update(
                         &mut s.pose_tracker,
                         &mut last_tracker_instant,
                         raw_persons,
                     );
                     s.last_tracker_instant = last_tracker_instant;
-                    if !tracked.is_empty() {
+                    tracked.truncate(pose_person_count(&update));
+                    if !update.classification.presence {
+                        update.persons = None;
+                    } else if !tracked.is_empty() {
                         update.persons = Some(tracked);
                     }
                     // #1050: attach real signal_field-peak positions to each person.
@@ -7080,17 +8524,23 @@ async fn udp_receiver_task(
                         // tripping back to the server.
                         node_features: build_node_features(&s.node_states, now),
                         room_inference: Some(room_inference),
+                        desk_occupancy: None,
+                        presence_gate: None,
                     };
 
+                    attach_desk_occupancy_with_memory(&mut s, &mut update);
                     let raw_persons = derive_pose_from_sensing(&update);
                     let mut last_tracker_instant = s.last_tracker_instant.take();
-                    let tracked = tracker_bridge::tracker_update(
+                    let mut tracked = tracker_bridge::tracker_update(
                         &mut s.pose_tracker,
                         &mut last_tracker_instant,
                         raw_persons,
                     );
                     s.last_tracker_instant = last_tracker_instant;
-                    if !tracked.is_empty() {
+                    tracked.truncate(pose_person_count(&update));
+                    if !update.classification.presence {
+                        update.persons = None;
+                    } else if !tracked.is_empty() {
                         update.persons = Some(tracked);
                     }
                     // #1050: attach real signal_field-peak positions to each person.
@@ -7249,7 +8699,7 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
         let (features, mut classification, breathing_rate_hz, sub_variances, raw_motion) =
             extract_features_from_frame(&frame, &s.frame_history, sample_rate_hz);
         smooth_and_classify(&mut s, &mut classification, raw_motion);
-        adaptive_override(&s, &features, &mut classification);
+        adaptive_override(&mut s, &features, &mut classification);
 
         s.rssi_history.push_back(features.mean_rssi);
         if s.rssi_history.len() > 60 {
@@ -7340,18 +8790,24 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
             },
             node_features: None,
             room_inference: None,
+            desk_occupancy: None,
+            presence_gate: None,
         };
 
+        attach_desk_occupancy_with_memory(&mut s, &mut update);
         // Populate persons from the sensing update (Kalman-smoothed via tracker).
         let raw_persons = derive_pose_from_sensing(&update);
         let mut last_tracker_instant = s.last_tracker_instant.take();
-        let tracked = tracker_bridge::tracker_update(
+        let mut tracked = tracker_bridge::tracker_update(
             &mut s.pose_tracker,
             &mut last_tracker_instant,
             raw_persons,
         );
         s.last_tracker_instant = last_tracker_instant;
-        if !tracked.is_empty() {
+        tracked.truncate(pose_person_count(&update));
+        if !update.classification.presence {
+            update.persons = None;
+        } else if !tracked.is_empty() {
             update.persons = Some(tracked);
         }
         // #1050: attach real signal_field-peak positions to each person.
@@ -8647,6 +10103,9 @@ async fn main() {
                     );
                 }),
         node_states: HashMap::new(),
+        desk_occupancy_memory: DeskOccupancyMemory::new(),
+        presence_gate: presence_baseline::PresenceGate::default(),
+        desk_discriminator: DeskDiscriminator::load(&data_dir),
         // Accuracy sprint
         pose_tracker: PoseTracker::new(),
         last_tracker_instant: None,
@@ -8985,6 +10444,14 @@ async fn main() {
         // Adaptive classifier endpoints
         .route("/api/v1/adaptive/train", post(adaptive_train))
         .route("/api/v1/adaptive/status", get(adaptive_status))
+        .route(
+            "/api/v1/presence/baseline/capture",
+            post(presence_baseline_capture),
+        )
+        .route(
+            "/api/v1/presence/baseline/status",
+            get(presence_baseline_status),
+        )
         .route("/api/v1/adaptive/unload", post(adaptive_unload))
         // Field model calibration (eigenvalue-based person counting)
         .route("/api/v1/calibration/start", post(calibration_start))
@@ -9977,6 +11444,8 @@ mod observatory_persons_field_position_tests {
             estimated_persons: Some(1),
             node_features: None,
             room_inference: None,
+            desk_occupancy: None,
+            presence_gate: None,
         }
     }
 

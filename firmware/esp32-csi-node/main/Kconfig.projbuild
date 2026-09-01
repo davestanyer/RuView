@@ -193,6 +193,31 @@ menu "Adaptive Controller (ADR-081)"
 
 endmenu
 
+menu "RuView active transmitter experiment"
+
+    config RUVIEW_ACTIVE_TX_ENABLE
+        bool "Emit periodic active sensing null-data frames"
+        default n
+        help
+            Experimental S3-compatible transmitter mode for controlled room
+            geometry tests. When enabled, the node remains a normal WiFi STA
+            but periodically calls csi_inject_ndp_frame(), causing the radio
+            to emit a minimal null-data frame via esp_wifi_80211_tx(). This is
+            not the C6-only soft-AP path; it is a reversible active-probe
+            experiment for nodes such as Dave's node 6.
+
+    config RUVIEW_ACTIVE_TX_INTERVAL_MS
+        int "Active transmitter interval (ms)"
+        default 50
+        range 10 2000
+        depends on RUVIEW_ACTIVE_TX_ENABLE
+        help
+            Period between active sensing transmissions. 50 ms is 20 Hz, which
+            matches the firmware's nominal CSI processing cadence without
+            creating a high-rate WiFi flood.
+
+endmenu
+
 menu "AMOLED Display (ADR-045)"
 
     config DISPLAY_ENABLE
@@ -307,6 +332,30 @@ menu "WASM Programmable Sensing (ADR-040)"
         help
             How often to call on_timer() on running WASM modules.
             Default 1000 ms = 1 Hz.
+
+    config CSI_GAIN_LOCK
+        bool "Lock AGC/FFT gain after boot baseline (amplitude-drift experiment)"
+        default n
+        help
+            ESP32 CSI amplitude is rescaled per-packet by automatic gain
+            control, which makes absolute amplitude statistics drift across
+            sessions (docs/handover/2026-07-04-weekend/THEORY.md §8a;
+            ESPectre / esp-csi gain-lock recipe). When enabled, the node
+            samples per-packet AGC/FFT gains for CSI_GAIN_LOCK_SAMPLES
+            packets after boot, then forces both gains to the baseline so
+            all subsequent CSI shares one amplitude scale. Deploy on ONE
+            node first and compare empty-room stability against an unlocked
+            node. Requires the esp_csi_gain_ctrl managed component
+            (S3/C3/C5/C6; not the original ESP32/S2).
+
+    config CSI_GAIN_LOCK_SAMPLES
+        int "CSI packets to sample before locking gain"
+        depends on CSI_GAIN_LOCK
+        default 100
+        range 50 1000
+        help
+            Number of packets used to establish the gain baseline before
+            forcing it (Espressif's reference uses 100 ≈ 2 s at 50 Hz).
 
 endmenu
 

@@ -17,6 +17,7 @@
 #include "edge_processing.h"
 #include "c6_timesync.h"  /* ADR-110: 802.15.4 epoch for cross-node alignment */
 #include "c6_sync_espnow.h" /* ADR-110 §A0.11: mesh-aligned epoch for sync packet */
+#include "gain_lock.h"    /* AGC/FFT gain lock — amplitude-drift experiment */
 
 #include <string.h>
 #include "esp_log.h"
@@ -295,6 +296,10 @@ static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
     }
 
     s_cb_count++;
+
+    /* AGC/FFT gain lock (CONFIG_CSI_GAIN_LOCK): sample gains for the boot
+     * baseline window, then force them so CSI amplitude shares one scale. */
+    gain_lock_on_packet(&info->rx_ctrl);
 
     if (s_cb_count <= 3 || (s_cb_count % 100) == 0) {
         ESP_LOGI(TAG, "CSI cb #%lu: len=%d rssi=%d ch=%d",

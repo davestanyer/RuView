@@ -131,6 +131,8 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+# Out-of-tree cargo target dir used for Debian bookworm container builds
+.cargo-target-bookworm/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -311,3 +313,15 @@ v2/crates/wifi-densepose-sensing-server/data/
 # ADR-324: wasm-bindgen output for ruview-offaxis is generated locally
 # (see the crate README); never commit generated artifacts.
 v2/crates/ruview-offaxis/pkg/
+# RuView desk-occupancy calibration — capture artifacts are local, not source.
+# The trained model JSON + its README under data/calibration/ ARE committed;
+# raw paired/ground-truth captures and regenerable replay scores are not.
+data/paired-ser8-*/
+data/ground-truth-ser8-*/
+data/calibration/scores/
+# uv.lock is not part of the desk-occupancy feature; un-ignore if you want
+# reproducible Python envs for the calibration scripts.
+uv.lock
+
+# Gain-lock experiment build dirs (idf.py -B variants)
+firmware/esp32-csi-node/build-*/

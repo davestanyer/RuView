@@ -1,0 +1,143 @@
+# RuView office node geometry calibration
+# Created: 2026-06-26T13:29:56+12:00
+# Source sketch: data/calibration/office_room_map_2026-06-26.jpg
+# Repo copy created: 2026-07-03 from Dave-provided sketch
+# Coordinate system: origin is top-left / north-west room corner; x metres east/right; y metres south/down; z metres height.
+# Dimensions and positions are approximate, extracted from Dave's sketch and description.
+
+room:
+  name: office
+  width_m: 4.14
+  depth_m: 5.0
+  coordinate_origin: north_west_top_left
+  sketch_path: data/calibration/office_room_map_2026-06-26.jpg
+
+landmarks:
+  router_or_ap:
+    description: green filled circle on west/left wall, left of Dave and below desk line
+    xy_m: [0.28, 1.72]
+    geometry_note: router is not central; direct paths radiate from west wall across/around desk zone
+  dave_usual_position:
+    description: blue smiley; seated/standing at green desk
+    xy_m: [1.32, 1.25]
+    role: primary_present_still_position
+  desk:
+    description: green desk across north/top of room, Dave sits/works just below it
+    approx_rect_m:
+      x_min: 0.15
+      x_max: 2.85
+      y_min: 0.30
+      y_max: 0.95
+    occlusion_notes:
+      - desk/monitor/screen area may block or distort node paths close to Dave
+      - node placement should favour torso/head-clear paths over under-desk leg/chair movement
+
+height_reference:
+  knee_m: 0.5
+  waist_m: 1.0
+  chest_m: 1.35
+  head_m: 1.65
+  high_reach_m: 2.1
+
+nodes:
+  1:
+    physical_order: top_left_then_clockwise_1
+    description: top/north wall near north-west corner, waist height
+    xyz_m: [0.42, 0.08, 1.0]
+    height_label: waist
+    geometry_role: multipath_reflection
+    initial_weight: 0.55
+    router_node_distance_m: 1.65
+    dave_node_distance_m: 1.48
+    dave_to_router_node_path_distance_m: 1.00
+    rationale: west/top witness; not a direct Dave-crossing path from router, but useful for room/background context and multipath changes near desk.
+  2:
+    physical_order: top_left_then_clockwise_2
+    description: north/top wall above desk, head height
+    xyz_m: [1.78, 0.08, 1.65]
+    height_label: head
+    geometry_role: direct_path
+    initial_weight: 1.0
+    router_node_distance_m: 2.22
+    dave_node_distance_m: 1.26
+    dave_to_router_node_path_distance_m: 0.45
+    rationale: likely strongest seated/desk direct-path witness; router-to-node path runs close to Dave and across desk zone at useful height.
+  3:
+    physical_order: top_left_then_clockwise_3
+    description: north-east/top-right corner, high reach height
+    xyz_m: [4.05, 0.25, 2.1]
+    height_label: high_reach
+    geometry_role: direct_path
+    initial_weight: 0.9
+    router_node_distance_m: 4.05
+    dave_node_distance_m: 2.91
+    dave_to_router_node_path_distance_m: 0.06
+    rationale: router-to-node path appears to pass almost through Dave's usual position; high mounting may be very useful for torso/head presence but could differ from low/knee dynamics.
+  4:
+    physical_order: top_left_then_clockwise_4
+    description: east/right wall mid-height, chest height
+    xyz_m: [4.05, 2.30, 1.35]
+    height_label: chest
+    geometry_role: multipath_reflection
+    initial_weight: 0.7
+    router_node_distance_m: 3.81
+    dave_node_distance_m: 2.92
+    dave_to_router_node_path_distance_m: 0.62
+    rationale: side/diagonal witness; not as direct as nodes 2/3 for seated Dave but useful for movement and east-side room changes.
+  5:
+    physical_order: top_left_then_clockwise_5
+    description: south-east/bottom-right, knee height
+    xyz_m: [3.75, 4.95, 0.5]
+    height_label: knee
+    geometry_role: weak_or_dead_angle
+    initial_weight: 0.35
+    router_node_distance_m: 4.74
+    dave_node_distance_m: 4.43
+    dave_to_router_node_path_distance_m: 1.05
+    rationale: far, low, and not close to Dave's seated path; likely best as a floor/leg/movement corroborator, downweighted for seated torso presence.
+  6:
+    physical_order: top_left_then_clockwise_6
+    description: south/bottom middle, waist height
+    xyz_m: [1.95, 4.95, 1.0]
+    height_label: waist
+    geometry_role: multipath_reflection
+    initial_weight: 0.45
+    router_node_distance_m: 3.64
+    dave_node_distance_m: 3.75
+    dave_to_router_node_path_distance_m: 1.14
+    rationale: south/back-room witness; useful for movement across room and background stability, but weak direct evidence for seated desk presence.
+
+current_live_snapshot_2026_06_26:
+  source: http://127.0.0.1:3000
+  nodes_seen: [1, 2, 3, 4, 5, 6]
+  all_nodes_active: true
+  fused_classification:
+    motion_level: absent
+    presence: false
+    confidence: 0.8467343859891691
+  per_node_projection_note: live per-node features still over-call present_moving/present_still while fused classification says absent; use this map to guide weighted fusion and calibration rather than equal node voting.
+  live_rssi_dbm:
+    1: -58.0
+    2: -56.0
+    3: -77.0
+    4: -64.0
+    5: -73.0
+    6: -63.0
+
+calibration_plan:
+  first_verify_ui: http://127.0.0.1:3000/ui/index.html
+  calibration_order:
+    - label: absent
+      duration_seconds: 120
+      requirement: Dave out of office; no one moving in room
+    - label: present_still
+      duration_seconds: 120
+      requirement: Dave seated at desk/usual blue-smiley position
+    - label: present_moving
+      duration_seconds: 120
+      requirement: Dave walking/natural movement across room, including paths near desk and centre
+  use_for_fusion:
+    - direct_path nodes 2 and 3 should dominate seated/presence evidence if reliable
+    - nodes 1, 4, and 6 should corroborate multipath/context changes
+    - node 5 should be downweighted for seated presence unless calibration proves otherwise
+    - preserve raw per-node evidence in debug endpoints; do not blindly mask disagreement

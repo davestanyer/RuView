@@ -1,0 +1,310 @@
+# RuView active-TX room geometry calibration
+# Created: 2026-07-20 by Zugg for Dave to edit.
+# Purpose: explicitly model node 6 as active illuminator/TX and nodes 1-5 as RX witnesses.
+#
+# Coordinate system copied from the 2026-06-26 room map:
+# - origin: north-west/top-left room corner
+# - x_m increases east/right
+# - y_m increases south/down
+# - z_m is height from floor
+#
+# Dave: update all approximate positions/descriptions below to match where the nodes actually are now.
+# Keep units in metres. If unsure, write null and add a note.
+
+schema_version: 1
+created: "2026-07-20"
+name: office_node6_active_tx_geometry
+source_maps:
+  previous_geometry: /home/davestanyer/.local/share/ruview/data/calibration/node_geometry_office_2026-06-26.yaml
+  source_sketch: /home/davestanyer/Documents/INFO/room.jpg
+  repo_sketch_copy: /home/davestanyer/RuView-upstream-main/data/calibration/office_room_map_2026-06-26.jpg
+  latest_sketch_observation:
+    date: "2026-07-20"
+    note: Dave updated room.jpg with numbers; node 6 is the numbered red square on the west/left wall, not the right-wall square. Earlier unnumbered-sketch inference was wrong.
+    numbered_node_xy_m_from_sketch:
+      1: [0.42, 0.05]
+      2: [1.79, 0.08]
+      3: [4.04, 0.25]
+      4: [4.05, 2.30]
+      5: [3.80, 4.91]
+      6: [0.08, 1.25]
+  latest_height_observation:
+    date: "2026-07-20"
+    note: Dave said node 6 is about where the pocket is in his jeans.
+    estimated_node6_z_m: 0.85
+  latest_node4_observation:
+    date: "2026-07-20"
+    note: Dave said node 4 is on the right wall middle, about mid/upper-body height. Numbered sketch confirms this as node 4.
+    estimated_node4_xyz_m: [4.05, 2.30, 1.45]
+  correction_note:
+    date: "2026-07-20"
+    note: Numbered sketch resolves prior node 4/node 6 conflict. Node 4 is right wall middle; node 6 active TX is left/west wall around y=1.25.
+
+room:
+  name: office
+  width_m: 4.14
+  depth_m: 5.0
+  coordinate_origin: north_west_top_left
+  notes:
+    - Update width/depth if the old sketch dimensions are now wrong.
+    - This file is for active-TX localisation/zone modelling, not broad presence only.
+
+landmarks:
+  router_or_ap:
+    description: old router/AP estimate from prior sketch; not the active-TX source for this geometry pass
+    xy_m: [0.28, 1.72]
+    notes:
+      - Keep for context, but active paths below use node 6 as TX.
+  dave_usual_desk_position:
+    description: usual seated/standing desk position
+    xy_m: [1.32, 1.25]
+    z_reference_m: 1.2
+    zone: desk
+    update_needed: true
+  desk:
+    description: desk area / primary work zone
+    approx_rect_m:
+      x_min: 0.15
+      x_max: 2.85
+      y_min: 0.30
+      y_max: 0.95
+    update_needed: true
+  door_or_exit:
+    description: add actual doorway / leaving-zone position
+    xy_m: null
+    approx_rect_m: null
+    update_needed: true
+  centre_room:
+    description: approximate open centre / walking zone
+    xy_m: [2.07, 2.50]
+    update_needed: true
+
+height_reference:
+  floor_m: 0.0
+  knee_m: 0.5
+  waist_m: 1.0
+  chest_m: 1.35
+  head_m: 1.65
+  high_reach_m: 2.1
+
+active_tx:
+  tx_node_id: 6
+  mode: active_illuminator
+  cadence_ms: 200
+  wifi_mode: joins_normal_wifi_no_new_network
+  notes:
+    - Node 6 emits periodic WiFi frames and remains manageable on normal WiFi.
+    - Receiver nodes must eventually identify node 6 frames separately from router/AP traffic for true link-aware localisation.
+    - Current live API still reports node 6 as an active CSI stream too; treat node6_rx as diagnostic unless proven useful.
+    - This map should drive zone/reliability features; it is not yet wired into the product runtime.
+
+nodes:
+  1:
+    role: rx_witness
+    current_position_source: updated_numbered_room_jpg_2026_07_20
+    description: node 1; top/north wall near north-west corner
+    xyz_m: [0.42, 0.05, 1.0]
+    height_label: waist
+    placement_update_needed: false
+    antenna_orientation: unknown
+    occlusion_notes: []
+    expected_use:
+      - background_context
+      - multipath_witness
+  2:
+    role: rx_witness
+    current_position_source: updated_numbered_room_jpg_2026_07_20
+    description: node 2; north/top wall above desk
+    xyz_m: [1.79, 0.08, 1.65]
+    height_label: head
+    placement_update_needed: false
+    antenna_orientation: unknown
+    occlusion_notes: []
+    expected_use:
+      - desk_zone_direct_or_near_direct_path
+      - seated_torso_witness
+  3:
+    role: rx_witness
+    current_position_source: updated_numbered_room_jpg_2026_07_20
+    description: node 3; north-east/top-right corner
+    xyz_m: [4.04, 0.25, 2.1]
+    height_label: high_reach
+    placement_update_needed: false
+    antenna_orientation: unknown
+    occlusion_notes: []
+    expected_use:
+      - desk_zone_or_centre_path
+      - torso_head_witness
+  4:
+    role: rx_witness
+    current_position_source: updated_numbered_room_jpg_2026_07_20_and_dave_confirmed_right_wall_middle
+    description: node 4; east/right wall middle, about mid/upper-body height
+    xyz_m: [4.05, 2.30, 1.45]
+    height_label: mid_upper_body
+    placement_update_needed: false
+    antenna_orientation: unknown
+    occlusion_notes:
+      - Dave confirmed node 4 is on the right wall middle at mid/upper-body height.
+      - Numbered sketch resolves prior conflict: node 4 is right wall; node 6 is left wall TX.
+    expected_use:
+      - side_room_witness
+      - movement_witness
+  5:
+    role: rx_witness
+    current_position_source: updated_numbered_room_jpg_2026_07_20
+    description: node 5; south-east/bottom-right
+    xyz_m: [3.80, 4.91, 0.5]
+    height_label: knee
+    placement_update_needed: false
+    antenna_orientation: unknown
+    occlusion_notes: []
+    expected_use:
+      - floor_or_leg_motion_witness
+      - weak_background_witness
+  6:
+    role: tx_illuminator
+    current_position_source: updated_numbered_room_jpg_2026_07_20_node_6_left_wall
+    description: node 6 active illuminator/TX; numbered red square on west/left wall near router/AP area, at jeans-pocket/hip height
+    xyz_m: [0.08, 1.25, 0.85]
+    height_label: jeans_pocket_hip
+    placement_update_needed: false
+    antenna_orientation: unknown
+    usb_power: SER8_or_reliable_USB
+    uart_observability: preferred_when_experimenting
+    position_notes:
+      - Corrected after Dave numbered the sketch. Node 6 is on the west/left wall, not the right/east wall.
+      - Estimated from numbered room.jpg by mapping node 6 red square centre to room coordinates.
+      - x/y estimate is strong; height updated from Dave's note that node 6 is about where the pocket is in his jeans.
+      - z=0.85m is an approximate jeans-pocket/hip-height working value; refine if measured.
+      - This supersedes both the old south/bottom-middle node 6 guess [1.95, 4.95, 1.0] and the mistaken unnumbered-sketch right-wall estimate [4.05, 2.30, 0.85].
+    expected_use:
+      - active_tx_source
+      - diagnostic_rx_stream_only_if_server_reports_it
+
+# Link/path geometry from TX node 6 to each RX witness.
+# Dave can update `path_role` and notes after correcting physical node positions.
+# Later we can compute line/zone intersections automatically from tx/rx xyz + zone rectangles.
+links:
+  tx6_rx1:
+    tx: 6
+    rx: 1
+    path_role: west_wall_tx_to_north_west_short_upper_path
+    expected_zone_sensitivity:
+      desk: low_candidate
+      near_desk: medium_candidate
+      centre: low_candidate
+      door: unknown
+      empty: background
+    reliability_prior: 0.55
+    notes:
+      - Node 6 and node 1 are both on/near the west/north-west side; likely useful for local west/top context rather than full desk-crossing geometry.
+  tx6_rx2:
+    tx: 6
+    rx: 2
+    path_role: west_wall_tx_to_north_desk_rx_candidate
+    expected_zone_sensitivity:
+      desk: high_candidate
+      near_desk: high_candidate
+      centre: medium_candidate
+      door: unknown
+      empty: background
+    reliability_prior: 0.9
+    notes:
+      - Numbered map puts node 2 above the desk; TX6->RX2 likely crosses Dave's desk/near-desk region and should be a high-value active-TX localisation path.
+  tx6_rx3:
+    tx: 6
+    rx: 3
+    path_role: west_wall_tx_to_north_east_long_desk_diagonal
+    expected_zone_sensitivity:
+      desk: high_candidate
+      near_desk: high_candidate
+      centre: medium_candidate
+      door: unknown
+      empty: background
+    reliability_prior: 0.85
+    notes:
+      - With node 6 on the west wall and node 3 in the north-east, this diagonal likely crosses the desk/upper-room region and may be one of the strongest desk-zone paths.
+  tx6_rx4:
+    tx: 6
+    rx: 4
+    path_role: west_wall_tx_to_east_wall_mid_cross_room_path
+    expected_zone_sensitivity:
+      desk: medium_candidate
+      near_desk: high_candidate
+      centre: high_candidate
+      door: unknown
+      empty: background
+    reliability_prior: 0.8
+    notes:
+      - Numbered sketch resolves prior node 4/node 6 conflict: node 6 is west/left wall TX and node 4 is east/right wall mid receiver.
+      - This cross-room path should be useful for near-desk, centre, and general movement localisation.
+  tx6_rx5:
+    tx: 6
+    rx: 5
+    path_role: west_wall_tx_to_south_east_long_lower_diagonal
+    expected_zone_sensitivity:
+      desk: medium_candidate
+      near_desk: medium_candidate
+      centre: high_candidate
+      door: unknown
+      empty: background
+    reliability_prior: 0.65
+    notes:
+      - Long low diagonal from west-wall TX to south-east floor/knee node; likely stronger for centre/lower-body movement and leaving/door paths than seated torso.
+
+zones:
+  empty:
+    label: empty
+    description: no person in room
+    geometry: whole_room_no_occupant
+  desk:
+    label: desk
+    description: Dave seated at normal desk position
+    approx_rect_m:
+      x_min: 0.15
+      x_max: 2.85
+      y_min: 0.30
+      y_max: 1.40
+    update_needed: true
+  near_desk:
+    label: near_desk
+    description: standing near desk / at chair / close to workstation but not seated
+    approx_rect_m:
+      x_min: 0.15
+      x_max: 3.10
+      y_min: 0.80
+      y_max: 2.10
+    update_needed: true
+  centre:
+    label: centre
+    description: walking/standing in centre of room
+    approx_rect_m:
+      x_min: 1.20
+      x_max: 3.20
+      y_min: 1.80
+      y_max: 3.80
+    update_needed: true
+  door:
+    label: door
+    description: doorway/leaving zone; fill in from current room layout
+    approx_rect_m: null
+    update_needed: true
+
+runtime_notes:
+  current_live_api_limitation:
+    observed: all nodes currently report placeholder position [2.0, 0.0, 1.5]
+    implication: live product is not yet using this geometry for room-zone localisation
+  next_tools:
+    - create geometry-aware zone monitor using this file
+    - log per-node features by tx6_rx path role
+    - capture short labelled bursts: desk, near_desk, centre, door, empty
+    - train first zone classifier separately from desk seated/standing/empty discriminator
+
+edit_checklist_for_dave:
+  - Confirm room width/depth.
+  - Correct node 6 physical position and height first.
+  - Correct nodes 1-5 positions and heights.
+  - Add doorway/exit zone rectangle.
+  - Note antenna orientation and occlusions, especially monitors/screens/walls.
+  - Mark any node that is no longer in the old position.
+  - Keep node IDs exactly as printed on/known for each physical board.

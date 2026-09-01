@@ -133,6 +133,24 @@ export class SensingTab {
                 <span>Change Points</span><span id="valChangePoints">0</span>
               </div>
               <div class="sensing-detail-row">
+                <span>Desk State</span><span id="valDeskState">--</span>
+              </div>
+              <div class="sensing-detail-row">
+                <span>Desk Confidence</span><span id="valDeskConfidence">--</span>
+              </div>
+              <div class="sensing-detail-row">
+                <span>Desk Stable</span><span id="valDeskStable">--</span>
+              </div>
+              <div class="sensing-detail-row">
+                <span>Model Seated</span><span id="valDeskModelSeated">--</span>
+              </div>
+              <div class="sensing-detail-row">
+                <span>Model Standing</span><span id="valDeskModelStandingNear">--</span>
+              </div>
+              <div class="sensing-detail-row">
+                <span>Model Away</span><span id="valDeskModelAway">--</span>
+              </div>
+              <div class="sensing-detail-row">
                 <span>Sample Rate</span><span id="valSampleRate">--</span>
               </div>
             </div>
@@ -271,6 +289,14 @@ export class SensingTab {
     // Details
     this._setText('valDomFreq', (f.dominant_freq_hz || 0).toFixed(3) + ' Hz');
     this._setText('valChangePoints', String(f.change_points || 0));
+    const desk = data.desk_occupancy || null;
+    this._setText('valDeskState', desk ? `${desk.state}${desk.seated ? ' ✓' : ''}` : '--');
+    this._setText('valDeskConfidence', desk ? `${((desk.confidence || 0) * 100).toFixed(0)}%` : '--');
+    this._setText('valDeskStable', desk && desk.stable_for_secs != null ? `${desk.stable_for_secs.toFixed(0)}s / ${((desk.window_secs || 0).toFixed(0))}s` : '--');
+    const votes = (desk && desk.votes) || {};
+    this._setText('valDeskModelSeated', votes.model_seated != null ? `${(votes.model_seated * 100).toFixed(0)}%` : '--');
+    this._setText('valDeskModelStandingNear', votes.model_standing_near != null ? `${(votes.model_standing_near * 100).toFixed(0)}%` : '--');
+    this._setText('valDeskModelAway', votes.model_away != null ? `${(votes.model_away * 100).toFixed(0)}%` : '--');
     const srcLabel = (data.source === 'simulated' || data.source === 'simulate') ? 'sim' : data.source || 'live';
     this._setText('valSampleRate', srcLabel);
 
