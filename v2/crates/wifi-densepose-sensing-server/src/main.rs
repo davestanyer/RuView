@@ -5290,11 +5290,6 @@ const EMPTY_OFFICE_BREATHING_BAND_FLOOR: f64 = 10.0;
 /// top-level (possibly latched) presence flag — see `DeskFrameEvidence::any_node_present`.
 const EMPTY_EVIDENCE_ABSENT_FRACTION: f64 = 0.70;
 
-/// A confident, sustained away-from-desk read is treated as unoccupied (top-level
-/// presence clamped off) once it has been stable for at least this long. Kept
-/// conservative so a briefly-misread still person is never clamped.
-const AWAY_CLAMP_STABLE_SECS: f64 = 12.0;
-
 /// Room-guard force-present needs corroboration from at least this many distinct
 /// fresh nodes, so one flickering desk node (node 2 = 1.7, node 3 = 1.5) can no
 /// longer hold the whole room `present` on its own.
@@ -5835,14 +5830,37 @@ fn attach_desk_occupancy_with_memory(state: &mut AppStateInner, update: &mut Sen
             .push_frame(node.node_id, &node.amplitude, now);
     }
     let gate_info = state.presence_gate.evaluate(now);
-    update.presence_gate = Some(gate_info);
-    if state.presence_gate.should_clamp_absent() && update.classification.presence {
-        update.classification.motion_level = "absent".to_string();
-        update.classification.presence = false;
-        update.vital_signs = None;
-        update.estimated_persons = None;
-        update.persons = None;
+    update.presence_gate = Some(gate_info.clone());
+    if state.presence_gate.should_clamp_absent() {
+        apply_presence_gate_absence_clamp(update, &gate_info);
     }
+}
+
+fn apply_presence_gate_absence_clamp(
+    update: &mut SensingUpdate,
+    gate_info: &presence_baseline::PresenceGateInfo,
+) {
+    update.classification.motion_level = "absent".to_string();
+    update.classification.presence = false;
+    update.classification.confidence = update.classification.confidence.max(0.85).clamp(0.0, 1.0);
+    update.vital_signs = None;
+    update.estimated_persons = None;
+    update.persons = None;
+    let previous_evidence_nodes = update
+        .desk_occupancy
+        .as_ref()
+        .map(|desk| desk.evidence_nodes.clone())
+        .unwrap_or_default();
+    update.desk_occupancy = Some(DeskOccupancyInfo {
+        state: "absent".to_string(),
+        seated: false,
+        confidence: (0.65 + (gate_info.sustained_empty_secs / 30.0).min(0.30)).clamp(0.0, 1.0),
+        evidence_nodes: previous_evidence_nodes,
+        note: "Presence gate has sustained a quorum-backed empty verdict; suppressing stale desk/posture classifier output".to_string(),
+        window_secs: None,
+        stable_for_secs: Some(gate_info.sustained_empty_secs),
+        votes: None,
+    });
 }
 
 fn product_absence_clamped(update: &SensingUpdate) -> bool {
@@ -5852,26 +5870,11 @@ fn product_absence_clamped(update: &SensingUpdate) -> bool {
     if desk.seated {
         return false;
     }
-    // 1. Explicit empty/absent desk state.
-    if desk.state == "absent" {
-        return true;
-    }
-    // 2. Sustained, confident away-from-desk with no seated evidence. Without
-    //    this the top-level presence flag stays latched `true` while the desk
-    //    layer says "away_or_unknown" — the primary empty-office mismatch.
-    //    Conservative: needs the camera-supervised model to agree it is away,
-    //    no seated candidacy, and the state stable for AWAY_CLAMP_STABLE_SECS.
-    if desk.state == "away_or_unknown" {
-        if let Some(votes) = desk.votes.as_ref() {
-            let sustained = desk.stable_for_secs.unwrap_or(0.0) >= AWAY_CLAMP_STABLE_SECS;
-            let model_says_away = votes.model_away.unwrap_or(0.0) >= 0.60;
-            let no_seated_evidence = votes.seated_candidate < 0.15;
-            if sustained && model_says_away && no_seated_evidence {
-                return true;
-            }
-        }
-    }
-    false
+    // Desk location is not room occupancy: a person in the open room can
+    // remain confidently away from the desk indefinitely. Only an explicit
+    // absence decision may suppress room presence; the independent baseline
+    // gate retains its own sustained-empty clamp.
+    desk.state == "absent"
 }
 
 fn effective_product_absent(update: &SensingUpdate) -> bool {
@@ -6261,14 +6264,17 @@ mod ruview_room_fusion_tests {
     }
 
     #[test]
-    fn sustained_confident_away_clamps_presence() {
+    fn sustained_confident_away_preserves_room_presence() {
+        // A person in the open room can be confidently away from the desk.
+        // Desk location is not evidence that the entire room is empty.
         let mut update = test_update("esp32", Some(1));
-        update.desk_occupancy = Some(away_desk_occupancy(AWAY_CLAMP_STABLE_SECS + 3.0));
+        update.desk_occupancy = Some(away_desk_occupancy(60.0));
         apply_product_absence_clamp(&mut update);
 
-        assert!(!update.classification.presence);
-        assert_eq!(update.classification.motion_level, "absent");
-        assert!(update.vital_signs.is_none());
+        assert!(update.classification.presence);
+        assert_ne!(update.classification.motion_level, "absent");
+        assert_eq!(update.estimated_persons, Some(1));
+        assert!(!effective_product_absent(&update));
     }
 
     #[test]
@@ -6292,11 +6298,43 @@ mod ruview_room_fusion_tests {
     }
 
     #[test]
-    fn effective_absence_keeps_desk_clamp_path() {
+    fn effective_absence_keeps_explicit_absent_desk_path() {
         let mut update = test_update("esp32", Some(1));
-        update.desk_occupancy = Some(away_desk_occupancy(AWAY_CLAMP_STABLE_SECS + 3.0));
+        let mut desk = away_desk_occupancy(60.0);
+        desk.state = "absent".to_string();
+        update.desk_occupancy = Some(desk);
 
         assert!(effective_product_absent(&update));
+    }
+
+    #[test]
+    fn sustained_empty_gate_overrides_away_and_seated_predictions() {
+        for seated in [false, true] {
+            let mut update = test_update("esp32", Some(1));
+            let mut desk = away_desk_occupancy(60.0);
+            desk.seated = seated;
+            if seated {
+                desk.state = "desk_seated".to_string();
+            }
+            update.desk_occupancy = Some(desk);
+            let gate = presence_baseline::PresenceGateInfo {
+                verdict: presence_baseline::GateVerdict::Empty,
+                baseline_age_secs: Some(60.0),
+                baseline_stale: false,
+                nodes_voting: 6,
+                nodes_occupied: 0,
+                sustained_empty_secs: 15.0,
+                node_z: Default::default(),
+            };
+            apply_presence_gate_absence_clamp(&mut update, &gate);
+            assert!(!update.classification.presence);
+            assert!(effective_product_absent(&update));
+            assert!(update.estimated_persons.is_none());
+            assert!(update.vital_signs.is_none());
+            let desk = update.desk_occupancy.as_ref().unwrap();
+            assert_eq!(desk.state, "absent");
+            assert!(!desk.seated);
+        }
     }
 
     #[test]

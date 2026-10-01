@@ -29,11 +29,12 @@ use serde::{Deserialize, Serialize};
 pub const WIN: usize = 20;
 /// Evaluate every STRIDE frames once the window is full — matches offline.
 pub const STRIDE: usize = 5;
-/// Deviation threshold in spread units. Retuned 2026-07-08 (R3 iteration) from
-/// 3.0 → 8.0 on clean locked-fleet + injection data: empty floor sits at z≈3–6,
-/// a still person at z≈5–45, so K=8 gives EMPTY 0% / STILL 100% / MOVE 100%
-/// occupied (wide clean window K=6–12). See THEORY §12.
-pub const K: f64 = 8.0;
+/// Deviation threshold in spread units. Retuned 2026-09-04 from 8.0 → 6.0
+/// after Dave-labelled four-state baseline showed the previous threshold left
+/// true occupied desk states with only one voting node while empty stayed below
+/// the two-node occupied quorum. Keep the room-level quorum as the false-blip
+/// guard; K should separate current geometry, not mask it. See THEORY §12.
+pub const K: f64 = 6.0;
 /// A node votes "occupied" when more than this fraction of its recent
 /// windows exceed [`K`] — matches offline node vote rule.
 pub const NODE_OCCUPIED_FRAC: f64 = 0.5;

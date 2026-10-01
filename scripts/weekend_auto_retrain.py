@@ -217,9 +217,14 @@ def cycle() -> dict:
     # --- 2. Staleness curve ----------------------------------------------------
     stale = []
     def t_of(name: str) -> float:
-        hhmmss = name.split("_")[-1].split(".")[0]
-        ymd = name.split("_")[-2]
-        return time.mktime(time.strptime(ymd + hhmmss, "%Y%m%d%H%M%S"))
+        # Accept both canonical names like auto_empty_YYYYMMDD_HHMMSS.jsonl
+        # and annotated manual names like
+        # auto_empty_manual_YYYYMMDD_HHMMSS_post_reprovision_all6.jsonl.
+        import re
+        m = re.search(r"(20\d{6})_(\d{6})", name)
+        if not m:
+            return 0.0
+        return time.mktime(time.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S"))
     for bi, bn in enumerate(names[:-1]):
         b = baseline_of(emp_streams[bn])
         for tn in names[bi + 1:]:

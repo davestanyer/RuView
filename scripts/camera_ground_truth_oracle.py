@@ -585,6 +585,8 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--minutes", type=float, default=None)
     ap.add_argument("--no-record", action="store_true")
+    ap.add_argument("--no-baseline-refresh", action="store_true",
+                    help="observe only: never trigger presence baseline captures")
     ap.add_argument("--empty-budget", type=float, default=REC_BUDGET_SECS,
                     help="max recorded seconds of empty CSI (default %(default)s)")
     ap.add_argument("--occ-budget", type=float, default=REC_BUDGET_SECS,
@@ -705,7 +707,7 @@ def main():
         # R3: camera-confirmed empty -> refresh the presence gate's baseline.
         # This is the seam ADR-135 was missing ("no reliable mechanism to
         # verify room emptiness from CSI alone").
-        if stable=="empty" and (now-last_baseline)>=BASELINE_REFRESH_SECS:
+        if not args.no_baseline_refresh and stable=="empty" and (now-last_baseline)>=BASELINE_REFRESH_SECS:
             last_baseline=now
             try:
                 post("/api/v1/presence/baseline/capture", {"duration_secs": BASELINE_CAPTURE_SECS})

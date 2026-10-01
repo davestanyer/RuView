@@ -21,7 +21,7 @@ Usage:
 from __future__ import annotations
 import argparse, socket, time, sys
 
-DEFAULT_NODES = [f"192.168.195.{o}" for o in (132, 182, 194, 201, 224, 247)]
+DEFAULT_NODES = [f"192.168.195.{o}" for o in (132, 182, 194, 200, 224, 247)]
 PORT = 5099  # arbitrary; frame arrival is what matters, not a listener
 PAYLOAD = b"ruview-csi-keepalive"
 
